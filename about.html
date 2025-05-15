@@ -12,6 +12,9 @@
             padding: 20px;
             line-height: 1.6;
             color: midnightblue;
+            font-size: 14px; /* Decreased font size */
+            opacity: 0; /* Start with 0 opacity */
+            animation: fadeIn 3s forwards; /* Fade-in animation */
         }
         h1 {
             font-family: 'NakedChicks', sans-serif;
@@ -19,8 +22,16 @@
             margin-bottom: 20px;
         }
         p {
-            font-size: 16px;
+            font-size: 14px; /* Match body font size */
             margin-bottom: 20px;
+        }
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+            to {
+                opacity: 1;
+            }
         }
     </style>
 </head>
