@@ -9,12 +9,41 @@
             font-family: 'OpenDyslexic', sans-serif;
             background-color: lavender;
             margin: 0;
-            padding: 20px;
+            padding: 0;
+            display: flex;
             line-height: 1.6;
             color: midnightblue;
-            font-size: 14px; /* Decreased font size */
-            opacity: 0; /* Start with 0 opacity */
-            animation: fadeIn 3s forwards; /* Fade-in animation */
+            font-size: 14px;
+            opacity: 0;
+            animation: fadeIn 3s forwards;
+        }
+        .menu {
+            width: 20%;
+            height: 100vh; /* Ensure the menu fills the full height of the viewport */
+            background-color: midnightblue;
+            color: white;
+            padding: 20px;
+            box-sizing: border-box;
+            display: flex; /* Enable flexbox */
+            flex-direction: column; /* Stack links vertically */
+            justify-content: center; /* Center menu vertically */
+            align-items: flex-start; /* Align links to the left */
+        }
+        .menu a {
+            display: block;
+            font-size: 16px;
+            font-style: italic;
+            color: white;
+            text-decoration: none;
+            margin-bottom: 10px;
+        }
+        .menu a:hover {
+            text-decoration: underline;
+        }
+        .content {
+            width: 80%;
+            padding: 20px;
+            box-sizing: border-box;
         }
         h1 {
             font-family: 'NakedChicks', sans-serif;
@@ -22,7 +51,7 @@
             margin-bottom: 20px;
         }
         p {
-            font-size: 14px; /* Match body font size */
+            font-size: 14px;
             margin-bottom: 20px;
         }
         @keyframes fadeIn {
@@ -36,13 +65,21 @@
     </style>
 </head>
 <body>
-    <h1>About Zoe Morales Ervolino</h1>
-    <p>Zoe Morales Ervolino gets projects from "chaotic idea" to "actually done" — usually with a spreadsheet open and a dry joke ready. A born-and-bred New Yorker with Colombian-Bronx roots and an Italian-Queens spirit, Zoe thrives on complex challenges with lots of moving pieces. She’s helped hospitals modernize their operations, played a key role in large-scale zoning reforms, and even built a custom legislative tracker to avoid the copy-and-paste grind (some skills you learn to make your life easier). If it’s messy and high-stakes, she’s probably interested.</p>
-    
-    <p>Zoe studied History and American Studies at Yale, where she focused on the connections between U.S. and Colombian political history. After graduating, she launched her career as an Analyst at Capalino, lobbying for organizations like the Environmental Defense Fund and Adobe. This work led her to her most recent role at Montefiore Einstein, where she led land use strategy for a proposed $2B healthcare campus in the Bronx. In this role, Zoe worked across elected offices, city agencies, and community groups to build support for what could become the borough’s tallest tower and largest public-private health investment. She excels at translating complex ideas across policy, tech, and community contexts — and getting high-stakes projects over the finish line.</p>
-    
-    <p>Her problem-solving approach is inspired by her abuelo, a retired MTA engineer, who instilled in her a passion for innovation and practical solutions. Zoe believes that asking 'why?' isn’t about finding answers, but about uncovering the true state of play — the foundation for crafting a strategy that creates the right conditions for success. She’s motivated by the belief that good planning and a decent sense of humor can fix almost anything — a mindset that helps her navigate both the complexities of her work and life.</p>
-    
-    <p>Recently, Zoe was named a finalist for the Bloomberg Fellowship at NYU Wagner, where she would have earned a Master’s in Urban Planning, but she chose to pursue a new path with CEO.works. Her growing interest in startups and entrepreneurship also led to her selection as a Factor Fellow with Primary Venture Partners and an Angeles Investors Fellow supporting Latinx-led ventures.</p>
+    <div class="menu">
+        <a href="index.html">home</a>
+        <a href="about.html">about</a>
+        <a href="https://www.linkedin.com/in/zoe-ervolino/" target="_blank">linkedin</a>
+        <a href="mailto:zoe@ervolino.com">contact</a>
+    </div>
+    <div class="content">
+        <h1>About Zoe Morales Ervolino</h1>
+        <p>Zoe Morales Ervolino gets projects from "chaotic idea" to "actually done" — usually with a spreadsheet open and a dry joke ready. A born-and-bred New Yorker with Colombian-Bronx roots and an Italian-Queens spirit, Zoe thrives on complex challenges with lots of moving pieces. She’s helped hospitals modernize their operations, played a key role in large-scale zoning reforms, and even built a custom legislative tracker to avoid the copy-and-paste grind (some skills you learn to make your life easier). If it’s messy and high-stakes, she’s probably interested.</p>
+        
+        <p>Zoe studied History and American Studies at Yale, where she focused on the connections between U.S. and Colombian political history. After graduating, she launched her career as an Analyst at Capalino, lobbying for organizations like the Environmental Defense Fund and Adobe. This work led her to her most recent role at Montefiore Einstein, where she led land use strategy for a proposed $2B healthcare campus in the Bronx. In this role, Zoe worked across elected offices, city agencies, and community groups to build support for what could become the borough’s tallest tower and largest public-private health investment. She excels at translating complex ideas across policy, tech, and community contexts — and getting high-stakes projects over the finish line.</p>
+        
+        <p>Her problem-solving approach is inspired by her abuelo, a retired MTA engineer, who instilled in her a passion for innovation and practical solutions. Zoe believes that asking 'why?' isn’t about finding answers, but about uncovering the true state of play — the foundation for crafting a strategy that creates the right conditions for success. She’s motivated by the belief that good planning and a decent sense of humor can fix almost anything — a mindset that helps her navigate both the complexities of her work and life.</p>
+        
+        <p>Recently, Zoe was named a finalist for the Bloomberg Fellowship at NYU Wagner, where she would have earned a Master’s in Urban Planning, but she chose to pursue a new path with CEO.works. Her growing interest in startups and entrepreneurship also led to her selection as a Factor Fellow with Primary Venture Partners and an Angeles Investors Fellow supporting Latinx-led ventures. She’s not saying she can fix everything, but if you’ve got a spreadsheet and a dream, she’s your person.</p>
+    </div>
 </body>
 </html>
