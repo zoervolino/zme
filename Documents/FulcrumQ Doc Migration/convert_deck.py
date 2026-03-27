@@ -2452,9 +2452,48 @@ def _style_rpr_as(rPr, is_title, is_subtitle=False):
 
 PIC_RECOLOR = "765FFF"   # Pivot Purple — dark anchor for duotone on embedded graphics
 
-def recolor_pics(slide_root):
-    """Apply duotone recolor (white → brand color) to all p:pic blips on a slide."""
-    NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+# Images whose area exceeds this fraction of the slide are treated as screenshots
+# (UI captures, spreadsheet grabs, etc.) and are NOT duotone-ified — they contain
+# structured content that must remain legible through the overlaid redaction shapes.
+_SCREENSHOT_AREA_FRAC = 0.20
+
+# Internal attribute used to communicate screenshot identity across passes.
+_FQ_SCREENSHOT_ATTR = "_fq_screenshot"
+
+
+def _pic_bbox(pic):
+    """Return (x, y, cx, cy) EMU tuple for a <p:pic>, or None."""
+    spPr = pic.find(f"{{{NS_P}}}spPr")
+    if spPr is None:
+        return None
+    xfrm = spPr.find(f"{{{NS_A}}}xfrm")
+    if xfrm is None:
+        return None
+    off = xfrm.find(f"{{{NS_A}}}off")
+    ext = xfrm.find(f"{{{NS_A}}}ext")
+    if off is None or ext is None:
+        return None
+    try:
+        return (int(off.get("x", 0)), int(off.get("y", 0)),
+                int(ext.get("cx", 0)), int(ext.get("cy", 0)))
+    except ValueError:
+        return None
+
+
+def recolor_pics(slide_root, slide_w=9144000, slide_h=5143500):
+    """Apply duotone recolor to embedded graphics.
+
+    Two tiers:
+      · Small images (< 20% of slide area) — logos, icons, brand graphics.
+        Gets purple/white duotone to align with FulcrumQ brand palette.
+      · Large images (≥ 20% of slide area) — screenshots of dashboards, tools,
+        spreadsheets, org charts.  These are left untouched so their content
+        remains legible.  They are tagged with _fq_screenshot so downstream
+        passes can detect overlay shapes sitting on top of them.
+
+    Returns count of images duotone-ified (excludes screenshots).
+    """
+    slide_area = slide_w * slide_h
     count = 0
     for pic in slide_root.iter(f"{{{NS_P}}}pic"):
         blipFill = pic.find(f"{{{NS_P}}}blipFill")
@@ -2463,6 +2502,15 @@ def recolor_pics(slide_root):
         blip = blipFill.find(f"{{{NS_A}}}blip")
         if blip is None:
             continue
+
+        # Classify by area: large = screenshot, small = logo/icon
+        bbox = _pic_bbox(pic)
+        if bbox is not None:
+            pic_area = bbox[2] * bbox[3]
+            if pic_area >= _SCREENSHOT_AREA_FRAC * slide_area:
+                pic.set(_FQ_SCREENSHOT_ATTR, "1")
+                continue   # preserve screenshot as-is
+
         # Remove SVG extension so PowerPoint uses the PNG fallback (SVGs ignore duotone)
         extLst = blip.find(f"{{{NS_A}}}extLst")
         if extLst is not None:
@@ -2470,13 +2518,89 @@ def recolor_pics(slide_root):
         # Remove any existing recolor effects
         for existing in blip.findall(f"{{{NS_A}}}duotone"):
             blip.remove(existing)
-        # DrawingML duotone: first child = dark/shadow end, second = light/highlight end
+        # DrawingML duotone: dark pixels → brand purple, light pixels → white
         duotone = etree.SubElement(blip, f"{{{NS_A}}}duotone")
         dark_end = etree.SubElement(duotone, f"{{{NS_A}}}srgbClr")
-        dark_end.set("val", PIC_RECOLOR)   # dark pixels → brand purple
+        dark_end.set("val", PIC_RECOLOR)
         light_end = etree.SubElement(duotone, f"{{{NS_A}}}srgbClr")
-        light_end.set("val", "FFFFFF")     # light pixels → white (not inverted)
+        light_end.set("val", "FFFFFF")
         count += 1
+    return count
+
+
+def neutralize_screenshot_overlays(slide_root) -> int:
+    """For every screenshot image on the slide, find the shapes that appear
+    on top of it in z-order and reset their fill to the slide's background
+    color (F2F2F2 for light layouts).
+
+    These are redaction/annotation overlays — white or light rectangles placed
+    by the author to hide sensitive values.  The normal color pass remaps their
+    fills to brand colors which can break their camouflage against the slide
+    background.  This pass restores that camouflage.
+
+    Only shapes with a solidFill that is white or near-white (perceived
+    luminance > 200) are treated; accent-coloured overlays (callout arrows,
+    annotation labels) are left alone.
+
+    Returns count of overlay shapes neutralized.
+    """
+    spTree = slide_root.find(f"{{{NS_P}}}cSld/{{{NS_P}}}spTree")
+    if spTree is None:
+        return 0
+
+    # Walk spTree in z-order, collecting screenshot bboxes as we encounter them.
+    # When we hit a shape later in z-order, check whether it overlaps any earlier screenshot.
+    slide_bg = _slide_bg_hex(slide_root) or "F2F2F2"
+    count = 0
+    screenshot_bboxes = []   # bboxes of screenshots seen so far (lower z-order)
+
+    for child in spTree:
+        tag = child.tag.split("}")[-1]
+
+        # Track screenshots as we pass them in z-order
+        if tag == "pic" and child.get(_FQ_SCREENSHOT_ATTR):
+            bb = _pic_bbox(child)
+            if bb:
+                screenshot_bboxes.append(bb)
+            continue
+
+        if tag != "sp" or not screenshot_bboxes:
+            continue
+
+        # Shape must have a near-white solidFill (luminance > 200)
+        spPr = child.find(f"{{{NS_P}}}spPr")
+        if spPr is None:
+            continue
+        sf = spPr.find(f"{{{NS_A}}}solidFill")
+        if sf is None:
+            continue
+        srgb = sf.find(f"{{{NS_A}}}srgbClr")
+        if srgb is None:
+            continue
+        fill_hex = srgb.get("val", "").upper()
+        try:
+            r, g, b = int(fill_hex[0:2], 16), int(fill_hex[2:4], 16), int(fill_hex[4:6], 16)
+            lum = 0.299 * r + 0.587 * g + 0.114 * b
+        except Exception:
+            continue
+        if lum < 200:
+            continue   # accent or dark fill — intentional, leave as-is
+
+        # Check spatial overlap with any screenshot below this shape
+        sp_bb = _get_shape_bbox(child)
+        if sp_bb is None:
+            continue
+        sx, sy, scx, scy = sp_bb
+        for px, py, pcx, pcy in screenshot_bboxes:
+            if sx < px + pcx and sx + scx > px and sy < py + pcy and sy + scy > py:
+                srgb.set("val", slide_bg)
+                count += 1
+                break
+
+    # Clean up screenshot markers
+    for pic in slide_root.iter(f"{{{NS_P}}}pic"):
+        pic.attrib.pop(_FQ_SCREENSHOT_ATTR, None)
+
     return count
 
 
@@ -3760,9 +3884,13 @@ def convert(source_path: Path):
         if parts:
             print(f"         styled : {', '.join(parts)}")
 
-        n_pics = recolor_pics(slide_root)
+        n_pics = recolor_pics(slide_root, slide_w, slide_h)
         if n_pics:
             print(f"         recolored: {n_pics} picture(s) → brand palette")
+
+        n_overlays = neutralize_screenshot_overlays(slide_root)
+        if n_overlays:
+            print(f"         redaction: {n_overlays} overlay shape(s) neutralized → slide bg")
 
 
         n_overrides = apply_text_color_overrides(slide_root, i)
