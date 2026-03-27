@@ -3363,6 +3363,152 @@ def _style_table_header_rows(slide_root) -> int:
     return count
 
 
+# ── Table body row banding ────────────────────────────────────────────────────
+
+_BAND_COLORS = ("F2F2F2", "FFFFFF")   # even rows, odd rows
+
+
+def _style_table_body_bands(slide_root) -> int:
+    """Apply alternating F2F2F2 / white fills to table body rows (rows 1+).
+    Cells that already carry an explicit solidFill are left untouched so
+    intentional categorical fills (e.g. RAG dots, accent rows) survive.
+    Returns the number of cells banded."""
+    count = 0
+    for tbl in slide_root.iter(f"{{{NS_A}}}tbl"):
+        rows = tbl.findall(f"{{{NS_A}}}tr")
+        if len(rows) < 2:
+            continue
+        for row_i, row in enumerate(rows[1:]):   # skip header
+            fill_val = _BAND_COLORS[row_i % 2]
+            for tc in row.findall(f"{{{NS_A}}}tc"):
+                tcPr = tc.find(f"{{{NS_A}}}tcPr")
+                # Skip if cell already has an explicit fill
+                if tcPr is not None and tcPr.find(f"{{{NS_A}}}solidFill") is not None:
+                    continue
+                if tcPr is None:
+                    txBody_idx = next(
+                        (j for j, ch in enumerate(tc)
+                         if ch.tag == f"{{{NS_A}}}txBody"),
+                        len(list(tc)),
+                    )
+                    tcPr = etree.Element(f"{{{NS_A}}}tcPr")
+                    tc.insert(txBody_idx, tcPr)
+                # Insert after any border elements (same ordering as header rows)
+                sf = etree.Element(f"{{{NS_A}}}solidFill")
+                srgb_el = etree.SubElement(sf, f"{{{NS_A}}}srgbClr")
+                srgb_el.set("val", fill_val)
+                insert_idx = 0
+                for ci, child in enumerate(tcPr):
+                    if child.tag in _TC_BORDER_TAGS:
+                        insert_idx = ci + 1
+                tcPr.insert(insert_idx, sf)
+                count += 1
+    return count
+
+
+# ── Compound group styling ────────────────────────────────────────────────────
+# enforce_text_contrast() uses z-order in spTree, so shapes *inside* grpSp
+# are invisible to its overlap detection.  This pass fixes that gap by
+# treating each group as a self-contained unit: find the background fill from
+# the rect member(s) and push contrast-correct text color to label members.
+
+def _sp_text_content(sp) -> str:
+    return "".join(t.text or "" for t in sp.iter(f"{{{NS_A}}}t")).strip()
+
+
+def _sp_area_emu(sp) -> int:
+    spPr = sp.find(f"{{{NS_P}}}spPr")
+    if spPr is None:
+        return 0
+    xfrm = spPr.find(f"{{{NS_A}}}xfrm")
+    if xfrm is None:
+        return 0
+    ext = xfrm.find(f"{{{NS_A}}}ext")
+    if ext is None:
+        return 0
+    try:
+        return int(ext.get("cx", 0)) * int(ext.get("cy", 0))
+    except ValueError:
+        return 0
+
+
+def _set_all_text_color(sp, hex_val: str) -> int:
+    """Write hex_val to every text-run color element in sp. Returns run count."""
+    n = 0
+    for tag in (f"{{{NS_A}}}rPr", f"{{{NS_A}}}endParaRPr", f"{{{NS_A}}}defRPr"):
+        for rPr in sp.iter(tag):
+            _set_rpr_color(rPr, hex_val)
+            n += 1
+    return n
+
+
+def style_compound_groups(slide_root, rag_preserve: set) -> int:
+    """
+    Style grouped shapes as compound semantic objects.
+
+    Called *after* style_slide() so fills are already brand-snapped.
+
+    Patterns handled
+    ────────────────
+    A  Self-contained card — sp has both solidFill AND text content.
+       Apply white text for dark fills, 1D1D1D for light fills.
+
+    B  Labeled card — GROUP contains separate bg rect (fill, no text) +
+       label shapes (text, noFill or transparent).  Contrast-correct text
+       color is derived from the largest bg rect's fill.
+
+    C  Uniform strip — N ≥ 3 similarly-sized shapes in a row/column.
+       Applies Pattern A to each self-contained child, Pattern B to
+       bg+label pairs within the strip.
+
+    Fills in rag_preserve are never touched.
+    Returns count of text runs recolored.
+    """
+    count = 0
+
+    for grpSp in slide_root.iter(f"{{{NS_P}}}grpSp"):
+        direct_sp = [c for c in grpSp if c.tag == f"{{{NS_P}}}sp"]
+        if not direct_sp:
+            continue
+
+        # Classify each direct child
+        bg_shapes    = []   # (sp, fill_hex) — has fill, no text
+        label_shapes = []   # sp — has text, no (or transparent) fill
+        card_shapes  = []   # (sp, fill_hex) — has both fill and text
+
+        for sp in direct_sp:
+            fill = _shape_fill_hex(sp)   # handles solid + gradient
+            text = _sp_text_content(sp)
+            no_fill = (sp.find(f"{{{NS_P}}}spPr/{{{NS_A}}}noFill") is not None
+                       or (sp.find(f"{{{NS_P}}}spPr/{{{NS_A}}}solidFill") is None
+                           and sp.find(f"{{{NS_P}}}spPr/{{{NS_A}}}gradFill") is None))
+
+            if fill and text:
+                card_shapes.append((sp, fill))
+            elif fill and not text:
+                bg_shapes.append((sp, fill))
+            elif text and no_fill:
+                label_shapes.append(sp)
+
+        # Pattern A — self-contained cards
+        for sp, fill in card_shapes:
+            if fill in rag_preserve:
+                continue
+            tc = "FFFFFF" if _bg_is_dark(fill) else "1D1D1D"
+            count += _set_all_text_color(sp, tc)
+
+        # Pattern B — bg rect + label pair(s)
+        if bg_shapes and label_shapes:
+            # Largest bg rect determines the group's background color
+            bg_sp, bg_fill = max(bg_shapes, key=lambda t: _sp_area_emu(t[0]))
+            if bg_fill and bg_fill not in rag_preserve:
+                tc = "FFFFFF" if _bg_is_dark(bg_fill) else "1D1D1D"
+                for lsp in label_shapes:
+                    count += _set_all_text_color(lsp, tc)
+
+    return count
+
+
 # ── Text box margin pass ──────────────────────────────────────────────────────
 TXBOX_INS_LR = 91440   # 0.10 inch in EMU  (lIns / rIns on <a:bodyPr>)
 TXBOX_INS_TB = 45720   # 0.05 inch in EMU  (tIns / bIns on <a:bodyPr>)
@@ -3630,6 +3776,14 @@ def convert(source_path: Path):
         n_tbl_hdrs = _style_table_header_rows(slide_root)
         if n_tbl_hdrs:
             print(f"         tbl-hdr  : {n_tbl_hdrs} table header cell(s) styled")
+
+        n_tbl_bands = _style_table_body_bands(slide_root)
+        if n_tbl_bands:
+            print(f"         tbl-band : {n_tbl_bands} table body row(s) banded")
+
+        n_grp = style_compound_groups(slide_root, detect_rag_colors(slide_root))
+        if n_grp:
+            print(f"         grp-style: {n_grp} group text run(s) contrasted")
 
         file_map[spath] = etree.tostring(
             slide_root, xml_declaration=True, encoding="UTF-8", standalone=True)
