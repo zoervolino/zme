@@ -1,0 +1,41 @@
+.env
+.DS_Store
+__pycache__/
+*.pyc
+~$*
+.claude/
+archive/
+ADQ Conversion Docs/
+FeedbackSamples/
+brand assets/
+
+# Client / test decks (not needed for the app)
+CEOWorks*
+eMobility*
+Org_Efficiency*
+Org_Simplification*
+Organization*
+Gaming*
+FeedbackSamples/
+LatestMaster_FQ_building*
+LatestMaster_FQ_improved*
+LatestMaster_FQ_revised*
+LatestMaster_FQ_test*
+FulcrumQ Canonical Slides.pptx
+FulcrumQ_Theme_vF.potx
+FulcrumQ_Theme_vF.pptx
+FulcrumQ_PPTX_Theme_vF.pptx
+FulcrumQ_Theme_vF_empty.pptx
+deck-conversion-roadmap.docx
+FulcrumQ Conversion Methodology.docx
+*.pdf
+
+# Utility / build scripts (not part of the deployed app)
+build_*.py
+make_v*.py
+patch_*.py
+fix_*.py
+inject_*.py
+revise_*.py
+swap_*.py
+convert_deck_option2.py
