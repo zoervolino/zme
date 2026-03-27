@@ -2528,46 +2528,46 @@ def recolor_pics(slide_root, slide_w=9144000, slide_h=5143500):
     return count
 
 
-def neutralize_screenshot_overlays(slide_root) -> int:
-    """For every screenshot image on the slide, find the shapes that appear
-    on top of it in z-order and reset their fill to the slide's background
-    color (F2F2F2 for light layouts).
+_FQ_OVERLAY_ATTR = "_fq_overlay"   # temporary attribute storing the frozen fill hex
 
-    These are redaction/annotation overlays — white or light rectangles placed
-    by the author to hide sensitive values.  The normal color pass remaps their
-    fills to brand colors which can break their camouflage against the slide
-    background.  This pass restores that camouflage.
 
-    Only shapes with a solidFill that is white or near-white (perceived
-    luminance > 200) are treated; accent-coloured overlays (callout arrows,
-    annotation labels) are left alone.
+def freeze_screenshot_overlays(slide_root, slide_w: int, slide_h: int) -> int:
+    """PRE-PASS — run before the color pipeline.
 
-    Returns count of overlay shapes neutralized.
+    Finds all large images (screenshots) in spTree z-order.  For every shape
+    that appears on top of a screenshot and has an explicit solidFill, saves
+    the current fill hex into a temporary _fq_overlay attribute.
+
+    Detection is purely geometric + z-order; fill color is irrelevant because
+    overlay shapes (redaction rects, blurs, annotation boxes) are whatever
+    color the author chose to match the underlying screenshot content.
+
+    restore_screenshot_overlays() must be called after styling to undo any
+    remapping the color pass applies to these shapes.
+
+    Returns count of overlay shapes frozen.
     """
     spTree = slide_root.find(f"{{{NS_P}}}cSld/{{{NS_P}}}spTree")
     if spTree is None:
         return 0
 
-    # Walk spTree in z-order, collecting screenshot bboxes as we encounter them.
-    # When we hit a shape later in z-order, check whether it overlaps any earlier screenshot.
-    slide_bg = _slide_bg_hex(slide_root) or "F2F2F2"
+    slide_area = slide_w * slide_h
     count = 0
-    screenshot_bboxes = []   # bboxes of screenshots seen so far (lower z-order)
+    screenshot_bboxes = []   # bboxes of screenshots encountered at lower z-order
 
     for child in spTree:
         tag = child.tag.split("}")[-1]
 
-        # Track screenshots as we pass them in z-order
-        if tag == "pic" and child.get(_FQ_SCREENSHOT_ATTR):
+        # Accumulate screenshot bboxes as we walk upward in z-order
+        if tag == "pic":
             bb = _pic_bbox(child)
-            if bb:
+            if bb and bb[2] * bb[3] >= _SCREENSHOT_AREA_FRAC * slide_area:
                 screenshot_bboxes.append(bb)
             continue
 
         if tag != "sp" or not screenshot_bboxes:
             continue
 
-        # Shape must have a near-white solidFill (luminance > 200)
         spPr = child.find(f"{{{NS_P}}}spPr")
         if spPr is None:
             continue
@@ -2578,24 +2578,51 @@ def neutralize_screenshot_overlays(slide_root) -> int:
         if srgb is None:
             continue
         fill_hex = srgb.get("val", "").upper()
-        try:
-            r, g, b = int(fill_hex[0:2], 16), int(fill_hex[2:4], 16), int(fill_hex[4:6], 16)
-            lum = 0.299 * r + 0.587 * g + 0.114 * b
-        except Exception:
+        if not fill_hex:
             continue
-        if lum < 200:
-            continue   # accent or dark fill — intentional, leave as-is
 
-        # Check spatial overlap with any screenshot below this shape
         sp_bb = _get_shape_bbox(child)
         if sp_bb is None:
             continue
         sx, sy, scx, scy = sp_bb
+
         for px, py, pcx, pcy in screenshot_bboxes:
             if sx < px + pcx and sx + scx > px and sy < py + pcy and sy + scy > py:
-                srgb.set("val", slide_bg)
+                child.set(_FQ_OVERLAY_ATTR, fill_hex)
                 count += 1
                 break
+
+    return count
+
+
+def restore_screenshot_overlays(slide_root) -> int:
+    """POST-PASS — run after the color pipeline.
+
+    For every shape tagged by freeze_screenshot_overlays(), writes the saved
+    fill hex back to the solidFill, undoing any remapping the color pass made.
+    Also cleans up the temporary _fq_screenshot attributes on pic elements.
+
+    Returns count of overlay shapes restored.
+    """
+    count = 0
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        original_hex = sp.get(_FQ_OVERLAY_ATTR)
+        if not original_hex:
+            continue
+        sp.attrib.pop(_FQ_OVERLAY_ATTR, None)
+
+        spPr = sp.find(f"{{{NS_P}}}spPr")
+        if spPr is None:
+            continue
+        # Ensure solidFill > srgbClr exists and restore the hex
+        sf = spPr.find(f"{{{NS_A}}}solidFill")
+        if sf is None:
+            sf = etree.SubElement(spPr, f"{{{NS_A}}}solidFill")
+        srgb = sf.find(f"{{{NS_A}}}srgbClr")
+        if srgb is None:
+            srgb = etree.SubElement(sf, f"{{{NS_A}}}srgbClr")
+        srgb.set("val", original_hex)
+        count += 1
 
     # Clean up screenshot markers
     for pic in slide_root.iter(f"{{{NS_P}}}pic"):
@@ -3871,6 +3898,12 @@ def convert(source_path: Path):
             total_vestiges += len(removed)
 
         convert_scheme_fills(slide_root)
+
+        # Freeze overlay fills BEFORE the color pass so they can be restored after.
+        # Detection is purely geometric: any solidFill shape in z-order above a
+        # large image (screenshot) is treated as an overlay regardless of its color.
+        n_frozen = freeze_screenshot_overlays(slide_root, slide_w, slide_h)
+
         n_names = remap_brand_names(slide_root)
         if n_names:
             print(f"         renamed  : {n_names} 'CEO Works' → 'FulcrumQ'")
@@ -3888,9 +3921,10 @@ def convert(source_path: Path):
         if n_pics:
             print(f"         recolored: {n_pics} picture(s) → brand palette")
 
-        n_overlays = neutralize_screenshot_overlays(slide_root)
-        if n_overlays:
-            print(f"         redaction: {n_overlays} overlay shape(s) neutralized → slide bg")
+        # Restore overlay fills to their pre-remap values
+        n_restored = restore_screenshot_overlays(slide_root)
+        if n_restored:
+            print(f"         redaction: {n_restored} overlay shape(s) preserved")
 
 
         n_overrides = apply_text_color_overrides(slide_root, i)
