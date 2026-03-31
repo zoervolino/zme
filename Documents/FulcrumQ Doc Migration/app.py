@@ -47,12 +47,26 @@ except ImportError:
 
 from lxml import etree as _ET
 
+# ── 4-layer pipeline ──────────────────────────────────────────────────────────
+try:
+    from classifier    import classify_deck    as _pl_classify
+    from schema_engine import run_schema_engine as _pl_schema
+    from renderer      import render_deck       as _pl_render
+    from qa_validator  import validate_render   as _pl_qa
+    _PIPELINE_AVAILABLE = True
+    _PIPELINE_MASTER = BASE_DIR / "FulcrumQ_Blank_Template.pptx"
+    _PIPELINE_RULES  = BASE_DIR / "layout_rules.json"
+except ImportError as _pie:
+    _PIPELINE_AVAILABLE = False
+    _PIPELINE_MASTER    = None
+    _PIPELINE_RULES     = None
+
 # ── Audit helpers ─────────────────────────────────────────────────────────────
 _BRAND_COLORS = {
     "765FFF","917FFF","AD9FFF","C8BFFF","E9E4FF",
     "1D1D1D","3B3B3B","585858","767676","7A828D",
-    "B2BBCA","D0D7DF","FFFFFF","00C27A","FF2E88",
-    "FFB547","60BDBC","281A42",
+    "B2BBCA","D0D7DF","F2F2F2","FFFFFF","00C27A","FF2E88",
+    "FFB547","60BDBC","EA3323","281A42",
 }
 _BRAND_FONTS = {"Segoe UI", "Arial"}
 _NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -914,8 +928,8 @@ st.markdown(f"""
 <div class="fq-pivot-line"></div>
 """, unsafe_allow_html=True)
 
-tab_convert, tab_palette, tab_logos, tab_icons, tab_type = st.tabs(
-    ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  Typography  "]
+tab_convert, tab_palette, tab_logos, tab_icons, tab_type, tab_rag = st.tabs(
+    ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  Typography  ", "  RAG  "]
 )
 
 
@@ -925,7 +939,7 @@ tab_convert, tab_palette, tab_logos, tab_icons, tab_type = st.tabs(
 with tab_convert:
     _cmode = st.radio(
         "_cmode",
-        ["Convert", "Brand Check"],
+        ["Convert", "Pipeline", "Brand Check"],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -945,20 +959,7 @@ with tab_convert:
         if uploaded:
             st.markdown("<br>", unsafe_allow_html=True)
 
-            # AI vision toggle
-            _api_key_set = bool(_os.environ.get("ANTHROPIC_API_KEY"))
-            _vision_help = (
-                "Runs a two-pass AI vision classifier on each slide after conversion. "
-                "Requires ANTHROPIC_API_KEY + LibreOffice."
-                if _HAS_VISION and _api_key_set
-                else "Set ANTHROPIC_API_KEY to enable AI classification."
-            )
-            use_vision = st.toggle(
-                "AI slide classification",
-                value=False,
-                disabled=not (_HAS_VISION and _api_key_set),
-                help=_vision_help,
-            )
+            use_vision = False
 
             col_btn, _ = st.columns([1, 4])
             with col_btn:
@@ -1153,6 +1154,181 @@ with tab_convert:
                                             unsafe_allow_html=True,
                                         )
 
+    # ── Pipeline mode ─────────────────────────────────────────────────────────
+    elif _cmode == "Pipeline":
+        _master_ok = _PIPELINE_AVAILABLE and _PIPELINE_MASTER and _PIPELINE_MASTER.exists()
+
+        if not _PIPELINE_AVAILABLE:
+            st.error("Pipeline modules not found. Ensure classifier.py, schema_engine.py, renderer.py, qa_validator.py are in the project directory.")
+        elif not _master_ok:
+            st.error(f"Master PPTX not found: {_PIPELINE_MASTER}")
+        else:
+            st.markdown(
+                '<div class="section-label" style="margin-bottom:0.5rem;">'
+                '4-layer pipeline — Classify → Schema → Render → QA</div>',
+                unsafe_allow_html=True,
+            )
+
+            pl_uploaded = st.file_uploader(
+                "Upload source PPTX",
+                type=["pptx"],
+                accept_multiple_files=False,
+                label_visibility="collapsed",
+                key="pl_upload",
+            )
+
+            if pl_uploaded:
+                col_pl, _ = st.columns([1, 4])
+                with col_pl:
+                    pl_run = st.button(
+                        "▶  Run Pipeline",
+                        type="primary",
+                        use_container_width=True,
+                        key="pl_run",
+                    )
+
+                if pl_run:
+                    with tempfile.TemporaryDirectory() as _tmp:
+                        _tmp_path = Path(_tmp)
+                        _src = _tmp_path / pl_uploaded.name
+                        _src.write_bytes(pl_uploaded.getvalue())
+                        _out_pptx = _tmp_path / (pl_uploaded.name.replace(".pptx", "_FQ.pptx"))
+                        _cls_json = _tmp_path / "classifier_output.json"
+                        _dec_json = _tmp_path / "schema_decisions.json"
+                        _ren_json = _tmp_path / "render_log.json"
+                        _qa_json  = _tmp_path / "qa_report.json"
+
+                        # Layer 1 — Classify
+                        with st.spinner("Layer 1 — Classifying slides…"):
+                            _cls_results = _pl_classify(_src, output_path=_cls_json)
+
+                        # Layer 2 — Schema
+                        with st.spinner("Layer 2 — Selecting layouts…"):
+                            _decisions = _pl_schema(_cls_results, _PIPELINE_RULES, output_path=_dec_json)
+
+                        # Layer 3 — Render
+                        with st.spinner("Layer 3 — Rendering…"):
+                            _ren_log = _pl_render(_src, _decisions, _PIPELINE_MASTER, _out_pptx, output_log=_ren_json)
+
+                        # Layer 4 — QA
+                        with st.spinner("Layer 4 — QA validation…"):
+                            _qa_report = _pl_qa(_out_pptx, _ren_log, _cls_results, output_path=_qa_json)
+
+                        # ── Render thumbnails for before/after ─────────────
+                        with st.spinner("Rendering preview…"):
+                            _before_thumbs = _render_slide_thumbs(_src)
+                            _after_thumbs  = _render_slide_thumbs(_out_pptx) if _out_pptx.exists() else []
+
+                        _qs = _qa_report["summary"]
+                        _total = _qs["total"]
+                        _pass  = _qs["pass"]
+                        _rev   = _qs["review"]
+                        _fail  = _qs["fail"]
+
+                        # ── Status bar ────────────────────────────────────
+                        st.markdown(
+                            f'<div style="display:flex;gap:10px;margin:0.75rem 0 1rem;flex-wrap:wrap;">'
+                            f'<span class="master-badge master-ok">✓ {_pass} pass</span>'
+                            f'<span class="master-badge" style="background:rgba(255,181,71,0.12);border:1px solid rgba(255,181,71,0.4);color:#FFB547;">△ {_rev} review</span>'
+                            f'<span class="master-badge master-err">✗ {_fail} fail</span>'
+                            f'<span class="master-badge" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.4);">{_total} slides</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                        # ── Download ──────────────────────────────────────
+                        if _out_pptx.exists():
+                            st.download_button(
+                                label=f"⬇  {_out_pptx.name}",
+                                data=_out_pptx.read_bytes(),
+                                file_name=_out_pptx.name,
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                key="pl_dl",
+                            )
+
+                        # ── Before / After thumbnails ─────────────────────
+                        if _before_thumbs or _after_thumbs:
+                            _qa_by_id = {s["slide_id"]: s for s in _qa_report["slides"]}
+                            _cls_by_id = {r["slide_id"]: r for r in _cls_results}
+                            _dec_by_id = {d["slide_id"]: d for d in _decisions}
+
+                            _STATUS_COLOR_PILL = {
+                                "pass":   ("#00C27A", "#fff"),
+                                "review": ("#FFB547", "#1d1d1d"),
+                                "fail":   ("#FF2E88", "#fff"),
+                            }
+                            _TYPE_COLOR_PILL = {
+                                "cover":   ("#765FFF", "#fff"),
+                                "divider": ("#281A42", "#fff"),
+                                "ending":  ("#00C27A", "#fff"),
+                                "content": ("#E9E4FF", "#281A42"),
+                            }
+
+                            st.markdown(
+                                '<div class="section-label" style="margin:1rem 0 0.5rem;">Before / After</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                            _COLS = 4
+                            _n_slides = max(len(_before_thumbs), len(_after_thumbs))
+                            for _row_start in range(0, _n_slides, _COLS):
+                                _cells_html = ""
+                                for _si in range(_row_start, min(_row_start + _COLS, _n_slides)):
+                                    _slide_num = _si + 1
+                                    _qa_s   = _qa_by_id.get(_slide_num, {})
+                                    _cls_s  = _cls_by_id.get(_slide_num, {})
+                                    _dec_s  = _dec_by_id.get(_slide_num, {})
+                                    _status = _qa_s.get("status", "?")
+                                    _stype  = _cls_s.get("type", "?")
+                                    _layout = _dec_s.get("selected_layout", "?")
+                                    _conf   = _cls_s.get("confidence", 0)
+                                    _issues = _qa_s.get("issues", [])
+
+                                    _sc, _sf = _STATUS_COLOR_PILL.get(_status, ("#888", "#fff"))
+                                    _tc, _tf = _TYPE_COLOR_PILL.get(_stype, ("#888", "#fff"))
+                                    _flag = " ⚑" if _conf < 0.75 else ""
+
+                                    _b_src = base64.b64encode(_before_thumbs[_si]).decode() if _si < len(_before_thumbs) else ""
+                                    _a_src = base64.b64encode(_after_thumbs[_si]).decode()  if _si < len(_after_thumbs)  else ""
+                                    _b_img = f'<img src="data:image/png;base64,{_b_src}" style="width:100%;display:block;">' if _b_src else '<div style="width:100%;padding-top:56.25%;background:#111;"></div>'
+                                    _a_img = f'<img src="data:image/png;base64,{_a_src}" style="width:100%;display:block;">' if _a_src else '<div style="width:100%;padding-top:56.25%;background:#111;"></div>'
+
+                                    _issue_txt = ""
+                                    if _issues:
+                                        _issue_txt = f'<div style="font-size:8px;color:rgba(255,255,255,0.4);margin-top:2px;line-height:1.3;">{"; ".join(_issues[:2])}{"…" if len(_issues)>2 else ""}</div>'
+
+                                    _cells_html += f"""
+                                    <div style="display:flex;flex-direction:column;gap:2px;">
+                                      <div style="font-size:8px;color:rgba(255,255,255,0.3);text-align:center;">#{_slide_num} before</div>
+                                      <div class="slide-thumb">{_b_img}</div>
+                                      <div style="font-size:8px;color:rgba(255,255,255,0.3);text-align:center;">after</div>
+                                      <div class="slide-thumb">{_a_img}</div>
+                                      <div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:2px;">
+                                        <span style="font-size:8px;font-weight:600;background:{_tc};color:{_tf};border-radius:3px;padding:1px 4px;">{_stype.upper()}{_flag}</span>
+                                        <span style="font-size:8px;background:{_sc};color:{_sf};border-radius:3px;padding:1px 4px;">{_status.upper()}</span>
+                                      </div>
+                                      <div style="font-size:8px;color:rgba(255,255,255,0.35);line-height:1.2;">{_layout}</div>
+                                      {_issue_txt}
+                                    </div>"""
+
+                                st.markdown(
+                                    f'<div style="display:grid;grid-template-columns:repeat({_COLS},1fr);gap:10px;margin-bottom:10px;">{_cells_html}</div>',
+                                    unsafe_allow_html=True,
+                                )
+
+                        # ── JSON artifact expanders ────────────────────────
+                        with st.expander("Classifier output", expanded=False):
+                            st.json(_cls_results)
+
+                        with st.expander("Schema decisions", expanded=False):
+                            st.json(_decisions)
+
+                        with st.expander("QA report", expanded=False):
+                            st.json(_qa_report)
+
+                        with st.expander("Render log", expanded=False):
+                            st.json(_ren_log)
+
     # ── Brand Check mode ──────────────────────────────────────────────────────
     else:
         st.markdown(
@@ -1286,6 +1462,20 @@ with tab_palette:
     if pal_view == "Brand Palette":
 
         BRAND_GROUPS = [
+            ("Guiding Grey", [
+                ("1D1D1D", "Guiding Grey"),
+                ("3B3B3B", "Grey 1"),
+                ("585858", "Grey 2"),
+                ("767676", "Grey 3"),
+                ("FFFFFF", "White"),
+            ]),
+            ("Neutral", [
+                ("281A42", "Vector Dark Purple"),
+                ("7A828D", "Grey Mid"),
+                ("B2BBCA", "Light Grey"),
+                ("D0D7DF", "Soft Grey"),
+                ("F2F2F2", "Lightest Grey"),
+            ]),
             ("Pivot Purple", [
                 ("765FFF", "Pivot Purple"),
                 ("917FFF", "Tint 1"),
@@ -1295,24 +1485,10 @@ with tab_palette:
             ]),
             ("Accents", [
                 ("00C27A", "Anchor Green"),
-                ("FFB547", "Amber"),
-                ("60BDBC", "Teal"),
+                ("FFB547", "Momentum Amber"),
+                ("EA3323", "Resistance Red"),
+                ("60BDBC", "Talent Teal"),
                 ("FF2E88", "Signal Magenta"),
-                ("C8BFFF", "Pivot Purple Tint 3"),
-            ]),
-            ("Dark", [
-                ("281A42", "Vector Dark Purple"),
-                ("1D1D1D", "Guiding Grey"),
-                ("3B3B3B", "Grey 1"),
-                ("585858", "Grey 2"),
-                ("767676", "Grey 3"),
-            ]),
-            ("Mid / Light", [
-                ("7A828D", "Grey Mid"),
-                ("B2BBCA", "Light Grey"),
-                ("D0D7DF", "Soft Grey"),
-                ("E9E4FF", "Light Lavender"),
-                ("FFFFFF", "White"),
             ]),
         ]
 
@@ -1560,7 +1736,14 @@ with tab_icons:
     from pptx.enum.shapes import MSO_SHAPE_TYPE as _MSO
     from PIL import Image as _Image
 
-    _ICONS_PATH = BASE_DIR / "icons_fq.pptx"
+    _ONEDRIVE_GUIDE = Path(
+        "/Users/zervolino/Library/CloudStorage"
+        "/OneDrive-SharedLibraries-CEOWorks"
+        "/Ming Yang - FulcrumQ Assests"
+        "/FulcrumQ PPTX - Master & Usage"
+        "/FulcrumQ Slide Guide & Examples.pptx"
+    )
+    _ICONS_PATH = _ONEDRIVE_GUIDE if _ONEDRIVE_GUIDE.exists() else BASE_DIR / "FQ_PPTX_Theme_vF.pptx"
     _DUO_DARK  = _np.array([0x76, 0x5F, 0xFF], dtype=_np.float32)
     _DUO_LIGHT = _np.array([0xFF, 0xFF, 0xFF], dtype=_np.float32)
 
@@ -1572,8 +1755,8 @@ with tab_icons:
         result = _np.dstack([rgb_out, rgba[:, :, 3].astype(_np.uint8)])
         return _Image.fromarray(result, "RGBA")
 
-    _WIDE_SHAPES = {"Picture 26"}
-    _EXCLUDED    = {"Picture 31"}
+    _WIDE_SHAPES = set()   # no wide composites in theme deck
+    _EXCLUDED    = set()   # no manual exclusions needed
     _ICON_SIZE   = 120
 
     def _fit_to_square(img: "_Image.Image", size: int) -> "_Image.Image":
@@ -1603,7 +1786,22 @@ with tab_icons:
         cur_icons: list = []
         wide_img = None
 
+        # Only process slides that are part of the Icon Library
+        # (skips color/usage/photo slides in the full theme deck)
+        icon_slides = []
         for slide in prs.slides:
+            for s in slide.shapes:
+                try:
+                    if "icon" in s.text_frame.text.strip().lower():
+                        icon_slides.append(slide)
+                        break
+                except Exception:
+                    pass
+        # Fall back to all slides if none matched (e.g. icons_fq.pptx)
+        if not icon_slides:
+            icon_slides = list(prs.slides)
+
+        for slide in icon_slides:
             for shape in sorted(slide.shapes, key=lambda s: (s.top or 0, s.left or 0)):
                 # ── Text shape → start a new section ─────────────────────────
                 if shape.has_text_frame and shape.shape_type != _MSO.PICTURE:
@@ -1815,3 +2013,163 @@ with tab_type:
             unsafe_allow_html=True,
         )
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — RAG
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_rag:
+
+    # ── RAG color scale (red → amber → green using approved brand hex) ─────────
+    RAG_SCALE = [
+        {"hex": "EA3323", "label": "Critical",   "score": 0},    # Resistance Red
+        {"hex": "FFB547", "label": "Caution",     "score": 50},   # Momentum Amber
+        {"hex": "00C27A", "label": "Strong",      "score": 100},  # Anchor Green
+    ]
+
+    def _rag_color(score: float) -> str:
+        """Interpolate hex color for a 0-100 score along the RAG scale."""
+        for i in range(len(RAG_SCALE) - 1):
+            lo = RAG_SCALE[i]
+            hi = RAG_SCALE[i + 1]
+            if lo["score"] <= score <= hi["score"]:
+                t = (score - lo["score"]) / (hi["score"] - lo["score"])
+                def _lerp_chan(a: str, b: str, ti: float, sl: slice) -> int:
+                    return round(int(a[sl], 16) * (1 - ti) + int(b[sl], 16) * ti)
+                r = _lerp_chan(lo["hex"], hi["hex"], t, slice(0, 2))
+                g = _lerp_chan(lo["hex"], hi["hex"], t, slice(2, 4))
+                b = _lerp_chan(lo["hex"], hi["hex"], t, slice(4, 6))
+                return f"#{r:02X}{g:02X}{b:02X}"
+        return f"#{RAG_SCALE[-1]['hex']}"
+
+    def _rag_text(hex_col: str) -> str:
+        r, g, b = int(hex_col[1:3], 16), int(hex_col[3:5], 16), int(hex_col[5:7], 16)
+        return "#1D1D1D" if (0.299 * r + 0.587 * g + 0.114 * b) > 160 else "#FFFFFF"
+
+    st.markdown("""
+<style>
+.rag-section-label {
+    font-family: var(--fq-font-head);
+    font-size: 9px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.14em; color: var(--fq-grey3);
+    margin: 1.6rem 0 0.7rem;
+}
+/* ── Color scale strip ── */
+.rag-strip { display:flex; border-radius:12px; overflow:hidden; height:72px; margin-bottom:0.5rem; }
+.rag-strip-seg {
+    flex:1; display:flex; flex-direction:column;
+    justify-content:flex-end; padding:7px 10px;
+}
+.rag-strip-label { font-size:9px; font-weight:700; letter-spacing:0.05em; }
+.rag-strip-hex   { font-family:var(--fq-font-mono); font-size:8px; opacity:0.72; margin-top:2px; }
+/* ── Gradient bar ── */
+.rag-grad-bar {
+    height:28px; border-radius:8px;
+    background: linear-gradient(to right,
+        #EA3323 0%, #FFB547 50%, #00C27A 100%);
+    position:relative; margin: 0.4rem 0 1.4rem;
+}
+.rag-grad-thumb {
+    position:absolute; top:-6px; width:16px; height:40px;
+    background:#FFFFFF; border-radius:4px;
+    box-shadow:0 2px 8px rgba(0,0,0,0.5);
+    transform:translateX(-50%);
+    border:2px solid rgba(0,0,0,0.25);
+    transition: left 0.1s;
+}
+.rag-grad-labels {
+    display:flex; justify-content:space-between;
+    font-size:9px; color:rgba(255,255,255,0.45);
+    font-family:var(--fq-font-mono); margin-top:2px;
+}
+/* ── Sample data grid ── */
+.rag-table { width:100%; border-collapse:collapse; font-size:12px; }
+.rag-table th {
+    text-align:left; padding:6px 10px;
+    border-bottom:1px solid rgba(255,255,255,0.1);
+    font-family:var(--fq-font-head); font-size:9px; font-weight:700;
+    text-transform:uppercase; letter-spacing:0.1em;
+    color:rgba(255,255,255,0.45);
+}
+.rag-table td { padding:6px 10px; color:rgba(255,255,255,0.85); }
+.rag-table tr:hover td { background:rgba(118,95,255,0.06); }
+.rag-badge {
+    display:inline-block; border-radius:6px;
+    padding:2px 9px; font-weight:700; font-size:11px;
+    font-family:var(--fq-font-mono); white-space:nowrap;
+}
+.rag-bar-wrap { width:100%; background:rgba(255,255,255,0.08); border-radius:4px; height:8px; overflow:hidden; }
+.rag-bar-fill { height:100%; border-radius:4px; }
+</style>
+""", unsafe_allow_html=True)
+
+    # ── Color scale strip ──────────────────────────────────────────────────────
+    st.markdown('<div class="rag-section-label">RAG Color Scale</div>', unsafe_allow_html=True)
+    segs = "".join(
+        f'<div class="rag-strip-seg" style="background:#{s["hex"]};">'
+        f'<span class="rag-strip-label" style="color:{_rag_text("#" + s["hex"])};">{s["label"]}</span>'
+        f'<span class="rag-strip-hex"   style="color:{_rag_text("#" + s["hex"])};">#{s["hex"]}</span>'
+        f'</div>'
+        for s in RAG_SCALE
+    )
+    st.markdown(f'<div class="rag-strip">{segs}</div>', unsafe_allow_html=True)
+
+    # ── Interactive gradient slider ────────────────────────────────────────────
+    st.markdown('<div class="rag-section-label">Gradient Slider</div>', unsafe_allow_html=True)
+    score = st.slider("RAG Score", 0, 100, 65, label_visibility="collapsed")
+    pct   = score / 100
+    color = _rag_color(float(score))
+    tcolor = _rag_text(color)
+    label = next((s["label"] for s in reversed(RAG_SCALE) if score >= s["score"]), RAG_SCALE[0]["label"])
+
+    st.markdown(
+        f'<div class="rag-grad-bar">'
+        f'<div class="rag-grad-thumb" style="left:{pct*100:.1f}%;"></div>'
+        f'</div>'
+        f'<div class="rag-grad-labels"><span>Resistance · #EA3323</span><span>Momentum · #FFB547</span><span>Anchor · #00C27A</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<span class="rag-badge" style="background:{color};color:{tcolor};">'
+        f'{label} — {score}</span>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Sample data grid ───────────────────────────────────────────────────────
+    st.markdown('<div class="rag-section-label" style="margin-top:2rem;">Sample Grid</div>', unsafe_allow_html=True)
+
+    SAMPLE_ROWS = [
+        ("Enterprise Sales",    "Q2 Target",  82, "$4.2M",  "↑ +12%"),
+        ("Mid-Market",          "Q2 Target",  61, "$1.8M",  "↔ Flat"),
+        ("SMB",                 "Q2 Target",  38, "$0.6M",  "↓ -8%"),
+        ("APAC Expansion",      "Milestone",  91, "Phase 3","↑ Ahead"),
+        ("Product Adoption",    "NPS Goal",   74, "68 NPS", "↑ +4pt"),
+        ("Renewal Rate",        "Retention",  55, "81%",    "↓ -3pt"),
+        ("Talent Pipeline",     "Headcount",  22, "4 / 18", "↓ Critical"),
+        ("Compliance Training", "Completion", 97, "97%",    "↑ On track"),
+    ]
+
+    header = (
+        "<table class='rag-table'>"
+        "<thead><tr>"
+        "<th>Initiative</th><th>Metric</th><th>Score</th>"
+        "<th>Progress</th><th>Value</th><th>Trend</th>"
+        "</tr></thead><tbody>"
+    )
+    rows_html = ""
+    for init, metric, sc, val, trend in SAMPLE_ROWS:
+        c  = _rag_color(sc)
+        tc = _rag_text(c)
+        rows_html += (
+            f"<tr>"
+            f"<td>{init}</td>"
+            f"<td style='color:rgba(255,255,255,0.45);font-size:11px;'>{metric}</td>"
+            f"<td><span class='rag-badge' style='background:{c};color:{tc};'>{sc}</span></td>"
+            f"<td style='width:120px;'>"
+            f"<div class='rag-bar-wrap'>"
+            f"<div class='rag-bar-fill' style='width:{sc}%;background:{c};'></div>"
+            f"</div></td>"
+            f"<td style='font-family:var(--fq-font-mono);font-size:11px;'>{val}</td>"
+            f"<td style='font-size:11px;color:rgba(255,255,255,0.55);'>{trend}</td>"
+            f"</tr>"
+        )
+    st.markdown(header + rows_html + "</tbody></table>", unsafe_allow_html=True)

@@ -1,0 +1,168 @@
+{
+  "version": "1.0",
+  "description": "FulcrumQ layout selection rules. Evaluated highest-priority first. First matching rule wins.",
+  "fallback_layout": "Content_Light",
+
+  "subtitle_upgrade_map": {
+    "Content_Light":    "Content_Light_Sub",
+    "1_Content_Dark":   "Content_Dark_Sub",
+    "Title_Only_Light": "Content_Light_Sub",
+    "Title_Only_Dark":  "Content_Dark_Sub",
+    "Divider_Crystal":  "Content_Light_Sub",
+    "Divider_Dark":     "Content_Dark_Sub"
+  },
+
+  "font_map": {
+    "Calibri":                "Aileron",
+    "Calibri Light":          "Aileron",
+    "Arial":                  "Aileron",
+    "Arial Narrow":           "Aileron",
+    "Helvetica":              "Aileron",
+    "Helvetica Neue":         "Aileron",
+    "Helvetica Neue Light":   "Aileron",
+    "Helvetica Neue Medium":  "Aileron",
+    "Helvetica Neue Bold":    "Aileron",
+    "Gill Sans":              "Aileron",
+    "Gill Sans MT":           "Aileron",
+    "Futura":                 "Aileron",
+    "Georgia":                "Aileron",
+    "Garamond":               "Aileron",
+    "Times New Roman":        "Aileron",
+    "Cambria":                "Aileron",
+    "Lato":                   "Switzer",
+    "Lato Light":             "Switzer",
+    "Lato Bold":              "Switzer",
+    "Open Sans":              "Switzer",
+    "Roboto":                 "Switzer",
+    "Source Sans Pro":        "Switzer",
+    "Source Sans 3":          "Switzer",
+    "Proxima Nova":           "Switzer",
+    "Myriad Pro":             "Switzer",
+    "Helvetica Neue Roman":   "Aileron",
+    "Helvetica Neue Thin":    "Aileron",
+    "Helvetica Neue UltraLight": "Aileron",
+    "Helvetica Neue Condensed Bold": "Aileron",
+    "Arial Black":            "Aileron",
+    "Arial Rounded MT Bold":  "Aileron",
+    "Century Gothic":         "Aileron",
+    "Trebuchet MS":           "Aileron",
+    "Verdana":                "Switzer",
+    "Tahoma":                           "Switzer",
+    "Lato Black":                       "Switzer",
+    "Lato Semibold":                    "Switzer",
+    "Lato Medium":                      "Switzer",
+    "Lato ExtraBold":                   "Switzer",
+    "Roboto Light":                     "Switzer",
+    "Roboto Medium":                    "Switzer",
+    "Roboto Bold":                      "Switzer",
+    "Roboto Condensed":                 "Switzer",
+    "Helvetica Neue Condensed":         "Aileron",
+    "Helvetica Neue Condensed Bold":    "Aileron",
+    "Helvetica Neue Extended":          "Aileron",
+    "Courier":                          "Aileron",
+    "Courier New":                      "Aileron",
+    "DIN Alternate":                    "Aileron",
+    "DIN Condensed":                    "Aileron",
+    "Avenir":                           "Aileron",
+    "Avenir Next":                      "Aileron",
+    "Brandon Grotesque":                "Aileron",
+    "Circular":                         "Aileron",
+    "GT Walsheim":                      "Aileron",
+    "Graphik":                          "Aileron",
+    "Aktiv Grotesk":                    "Aileron",
+    "Nunito Sans":                      "Switzer",
+    "Nunito":                           "Switzer",
+    "Poppins":                          "Switzer",
+    "Inter":                            "Switzer",
+    "IBM Plex Sans":                    "Switzer",
+    "Segoe UI":                         "Switzer",
+    "Segoe UI Light":                   "Switzer",
+    "Segoe UI Semibold":                "Switzer",
+    "Segoe UI Bold":                    "Switzer",
+    "Segoe UI Semilight":               "Switzer",
+    "Segoe Print":                      "Switzer",
+    "Segoe Script":                     "Switzer",
+    "Franklin Gothic Medium":           "Aileron",
+    "Franklin Gothic Book":             "Aileron",
+    "Palatino Linotype":                "Aileron",
+    "Book Antiqua":                     "Aileron",
+    "Gill Sans Ultra Bold":             "Aileron",
+    "Microsoft Sans Serif":             "Switzer",
+    "Candara":                          "Switzer",
+    "Constantia":                       "Aileron",
+    "Corbel":                           "Switzer"
+  },
+
+  "layout_rules": [
+    {
+      "id": "cover-dark",
+      "priority": 1000,
+      "conditions": { "type": "cover", "bg_is_dark": true },
+      "layout": "Cover_Dark",
+      "decision_path": ["type=cover", "bg_is_dark=true", "→ layout=Cover_Dark"]
+    },
+    {
+      "id": "cover-light",
+      "priority": 999,
+      "conditions": { "type": "cover" },
+      "layout": "Cover_Light",
+      "decision_path": ["type=cover", "→ layout=Cover_Light"]
+    },
+    {
+      "id": "divider-dark",
+      "priority": 900,
+      "conditions": { "type": "divider", "bg_is_dark": true },
+      "layout": "Divider_Dark",
+      "decision_path": ["type=divider", "bg_is_dark=true", "→ layout=Divider_Dark"]
+    },
+    {
+      "id": "divider-light",
+      "priority": 899,
+      "conditions": { "type": "divider" },
+      "layout": "Divider_Crystal",
+      "decision_path": ["type=divider", "→ layout=Divider_Crystal"]
+    },
+    {
+      "id": "ending",
+      "priority": 800,
+      "conditions": { "type": "ending" },
+      "layout": "Ending_PivotPurple",
+      "decision_path": ["type=ending", "→ layout=Ending_PivotPurple"]
+    },
+    {
+      "id": "content-subtitle-dark",
+      "priority": 760,
+      "conditions": { "type": "content", "has_subtitle": true, "bg_is_dark": true },
+      "layout": "Content_Dark_Sub",
+      "decision_path": ["type=content", "has_subtitle=true", "bg_is_dark=true", "→ layout=Content_Dark_Sub"]
+    },
+    {
+      "id": "content-subtitle-light",
+      "priority": 759,
+      "conditions": { "type": "content", "has_subtitle": true },
+      "layout": "Content_Light_Sub",
+      "decision_path": ["type=content", "has_subtitle=true", "→ layout=Content_Light_Sub"]
+    },
+    {
+      "id": "content-dark",
+      "priority": 700,
+      "conditions": { "type": "content", "bg_is_dark": true },
+      "layout": "1_Content_Dark",
+      "decision_path": ["type=content", "bg_is_dark=true", "→ layout=1_Content_Dark"]
+    },
+    {
+      "id": "content-sparse-visual",
+      "priority": 600,
+      "conditions": { "type": "content", "text_density": "low", "has_chart": false, "image_count_gt": 0 },
+      "layout": "Title_Only_Light",
+      "decision_path": ["type=content", "text_density=low", "has_chart=false", "image_count>0", "→ layout=Title_Only_Light"]
+    },
+    {
+      "id": "content-default",
+      "priority": 100,
+      "conditions": { "type": "content" },
+      "layout": "Content_Light",
+      "decision_path": ["type=content", "→ layout=Content_Light"]
+    }
+  ]
+}

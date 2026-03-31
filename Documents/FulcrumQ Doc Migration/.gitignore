@@ -30,6 +30,10 @@ deck-conversion-roadmap.docx
 FulcrumQ Conversion Methodology.docx
 *.pdf
 
+# Eval / test output (local only)
+eval_output/
+snapshots/
+
 # Utility / build scripts (not part of the deployed app)
 build_*.py
 make_v*.py
