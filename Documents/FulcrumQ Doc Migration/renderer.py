@@ -361,53 +361,75 @@ def _strip_bullets(slide_root: etree._Element) -> None:
                     etree.SubElement(pPr, f"{{{NS_A}}}buNone")
 
 
-# Layout families that should never show footer/page-number shapes
-_NO_FOOTER_LAYOUTS = {
-    "Divider_Dark", "Divider_Crystal",
-    "Cover_Dark", "Cover_Light", "Cover_Photo",
-    "Ending_PivotPurple", "Ending_Dark",
-    "Blank_Dark", "Blank_Light",
-}
-# Layouts with no body content slot — any body ph from source is orphaned
-_NO_BODY_LAYOUTS_RENDERER = {
-    "Divider_Dark", "Divider_Crystal",
-    "Cover_Dark", "Cover_Light", "Cover_Photo",
-    "Ending_PivotPurple", "Ending_Dark",
-    "Blank_Dark", "Blank_Light",
-    "Title_Only_Light", "Title_Only_Dark",
-}
+# Footer placeholder types — always stripped from slide XML so FQ layout governs position
 _FOOTER_PH_TYPES = {"sldNum", "dt", "ftr"}
+
+# Body idx slots present in each FQ layout (from master inspection).
+# Used to remap source body ph idx values to the nearest available slot.
+_LAYOUT_BODY_SLOTS: dict[str, list[str]] = {
+    "Cover_Dark":          ["12", "13"],
+    "Cover_Light":         ["12", "13"],
+    "Cover_Photo":         ["12", "13"],
+    "Divider_Dark":        ["12"],
+    "Divider_Crystal":     ["12"],
+    "Ending_Dark":         ["12"],
+    "Ending_PivotPurple":  ["12"],
+    "Blank_Dark":          [],
+    "Blank_Light":         [],
+    "Content_Light":       ["11"],
+    "1_Content_Dark":      ["11"],
+    "Content_Light_Sub":   ["11", "12"],
+    "Content_Dark_Sub":    ["11", "12"],
+    "Title_Only_Light":    [],
+    "Title_Only_Dark":     [],
+}
 
 
 def _strip_footer_shapes(slide_root: etree._Element, layout_name: str) -> int:
     """
     1. Always strip explicit sldNum/dt/ftr shapes from the slide XML so the
-       FQ layout governs their position (prevents source-deck positions
-       overriding the designed bottom strip).
-    2. For no-footer layouts (Divider/Cover/Ending/Blank) also strip any
-       body ph shapes — these have no matching slot in the layout and would
-       render at 0,0 as a lone bullet.
-    Returns count of shapes removed.
+       FQ layout governs their position.
+    2. For body ph shapes whose idx doesn't match any slot in the target layout:
+       - If the layout has body slots available, remap the ph idx to the first
+         available slot so the content lands in the subtitle/eyebrow area rather
+         than rendering as an orphaned bullet at 0,0.
+       - If the layout has NO body slots (Blank, Title_Only), strip the shape.
+    Returns count of shapes removed/remapped.
     """
     spTree = slide_root.find(f".//{{{NS_P}}}spTree")
     if spTree is None:
         return 0
 
-    removed = 0
-    strip_body = layout_name in _NO_BODY_LAYOUTS_RENDERER
+    layout_slots = _LAYOUT_BODY_SLOTS.get(layout_name, ["11"])
+    changed = 0
 
     for sp in list(spTree):
         ph = sp.find(f".//{{{NS_P}}}ph")
         if ph is None:
             continue
         ph_type = ph.get("type", "body")
+
+        # Always strip footer types
         if ph_type in _FOOTER_PH_TYPES:
             spTree.remove(sp)
-            removed += 1
-        elif strip_body and ph_type == "body":
-            spTree.remove(sp)
-            removed += 1
-    return removed
+            changed += 1
+            continue
+
+        # Remap or strip orphaned body / subTitle ph shapes
+        if ph_type in ("body", "subTitle"):
+            current_idx = ph.get("idx", "")
+            if current_idx not in layout_slots:
+                if layout_slots:
+                    # Remap to the first available body slot and normalise type
+                    ph.set("type", "body")
+                    ph.set("idx", layout_slots[0])
+                    changed += 1
+                else:
+                    # No body slots at all (Blank, Title_Only) — strip
+                    spTree.remove(sp)
+                    changed += 1
+
+    return changed
 
 
 # ── Title lift pass ───────────────────────────────────────────────────────────
