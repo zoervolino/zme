@@ -937,7 +937,6 @@ st.markdown(f"""
 
 _tab_labels = ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  RAG  ", "  Semantic Ingest  "]
 tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_semantic = st.tabs(_tab_labels)
-tab_type = st.container()  # hidden — typography tab removed from nav
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1899,9 +1898,11 @@ with tab_icons:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — TYPOGRAPHY
+# TAB 5 — TYPOGRAPHY (hidden)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_type:
+if False:  # noqa — tab removed from nav; keep block for reference
+    pass
+if False:
     import json as _json
 
     # Type scale scraped from style_guide.json + master PPTX spec
