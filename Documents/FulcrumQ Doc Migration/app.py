@@ -47,6 +47,13 @@ except ImportError:
 
 from lxml import etree as _ET
 
+# ── Semantic Ingest tab ───────────────────────────────────────────────────────
+try:
+    from tabs.semantic_ingest_tab import render_semantic_ingest_tab
+    _HAS_SEMANTIC_INGEST = True
+except ImportError:
+    _HAS_SEMANTIC_INGEST = False
+
 # ── 4-layer pipeline ──────────────────────────────────────────────────────────
 try:
     from classifier    import classify_deck    as _pl_classify
@@ -928,9 +935,9 @@ st.markdown(f"""
 <div class="fq-pivot-line"></div>
 """, unsafe_allow_html=True)
 
-tab_convert, tab_palette, tab_logos, tab_icons, tab_type, tab_rag = st.tabs(
-    ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  Typography  ", "  RAG  "]
-)
+_tab_labels = ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  RAG  ", "  Semantic Ingest  "]
+tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_semantic = st.tabs(_tab_labels)
+tab_type = st.container()  # hidden — typography tab removed from nav
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2173,3 +2180,16 @@ with tab_rag:
             f"</tr>"
         )
     st.markdown(header + rows_html + "</tbody></table>", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — SEMANTIC INGEST
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_semantic:
+    if _HAS_SEMANTIC_INGEST:
+        render_semantic_ingest_tab()
+    else:
+        st.error(
+            "Semantic Ingest tab failed to load. "
+            "Ensure `services/` and `tabs/` are present in the project directory."
+        )

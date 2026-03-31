@@ -368,27 +368,43 @@ _NO_FOOTER_LAYOUTS = {
     "Ending_PivotPurple", "Ending_Dark",
     "Blank_Dark", "Blank_Light",
 }
+# Layouts with no body content slot — any body ph from source is orphaned
+_NO_BODY_LAYOUTS_RENDERER = {
+    "Divider_Dark", "Divider_Crystal",
+    "Cover_Dark", "Cover_Light", "Cover_Photo",
+    "Ending_PivotPurple", "Ending_Dark",
+    "Blank_Dark", "Blank_Light",
+    "Title_Only_Light", "Title_Only_Dark",
+}
 _FOOTER_PH_TYPES = {"sldNum", "dt", "ftr"}
 
 
 def _strip_footer_shapes(slide_root: etree._Element, layout_name: str) -> int:
     """
-    For layouts that intentionally have no footer/page-number, remove any
-    sldNum / dt / ftr placeholder shapes from the slide XML so they don't
-    render over the clean layout background.
+    1. Always strip explicit sldNum/dt/ftr shapes from the slide XML so the
+       FQ layout governs their position (prevents source-deck positions
+       overriding the designed bottom strip).
+    2. For no-footer layouts (Divider/Cover/Ending/Blank) also strip any
+       body ph shapes — these have no matching slot in the layout and would
+       render at 0,0 as a lone bullet.
     Returns count of shapes removed.
     """
-    if layout_name not in _NO_FOOTER_LAYOUTS:
-        return 0
-
     spTree = slide_root.find(f".//{{{NS_P}}}spTree")
     if spTree is None:
         return 0
 
     removed = 0
+    strip_body = layout_name in _NO_BODY_LAYOUTS_RENDERER
+
     for sp in list(spTree):
         ph = sp.find(f".//{{{NS_P}}}ph")
-        if ph is not None and ph.get("type", "") in _FOOTER_PH_TYPES:
+        if ph is None:
+            continue
+        ph_type = ph.get("type", "body")
+        if ph_type in _FOOTER_PH_TYPES:
+            spTree.remove(sp)
+            removed += 1
+        elif strip_body and ph_type == "body":
             spTree.remove(sp)
             removed += 1
     return removed
