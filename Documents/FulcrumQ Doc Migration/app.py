@@ -146,7 +146,10 @@ def _brand_check(pptx_bytes: bytes) -> list[dict]:
 def _render_slide_thumbs(pptx_path: Path, width_px: int = 320) -> list[bytes]:
     """Render PPTX slides → PNG thumbnails via LibreOffice + PyMuPDF.
     Returns [] silently if LibreOffice times out or is unavailable."""
-    import fitz
+    try:
+        import fitz
+    except ImportError:
+        return []
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         try:
