@@ -945,7 +945,7 @@ tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_semantic = st.tabs(
 with tab_convert:
     _cmode = st.radio(
         "_cmode",
-        ["Convert", "Pipeline", "Brand Check"],
+        ["Convert", "Pipeline", "Brand Check", "Render from Schema"],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -1336,7 +1336,7 @@ with tab_convert:
                             st.json(_ren_log)
 
     # ── Brand Check mode ──────────────────────────────────────────────────────
-    else:
+    elif _cmode == "Brand Check":
         st.markdown(
             '<div class="section-label" style="margin-bottom:0.5rem;">'
             'Upload a deck to flag off-brand colors, fonts, and CEO Works references per slide</div>',
@@ -1451,6 +1451,135 @@ with tab_convert:
                                         '<span style="font-size:11px;color:var(--fq-green);">None ✓</span>',
                                         unsafe_allow_html=True,
                                     )
+
+    # ── Render from Schema mode ───────────────────────────────────────────────
+    elif _cmode == "Render from Schema":
+        if not _PIPELINE_AVAILABLE:
+            st.error("Pipeline unavailable — renderer.py / qa_validator.py not found.")
+        elif not (_PIPELINE_MASTER and _PIPELINE_MASTER.exists()):
+            st.error(f"Master PPTX not found: {_PIPELINE_MASTER}")
+        else:
+            st.caption(
+                "Bypass classification — upload a source PPTX and its semantic_schema.json "
+                "to render directly from the schema."
+            )
+
+            _rfs_col1, _rfs_col2 = st.columns(2)
+            with _rfs_col1:
+                _rfs_pptx = st.file_uploader(
+                    "Source PPTX",
+                    type=["pptx"],
+                    key="rfs_pptx",
+                )
+            with _rfs_col2:
+                _rfs_schema_file = st.file_uploader(
+                    "semantic_schema.json",
+                    type=["json"],
+                    key="rfs_schema",
+                    help="Produced by the Semantic Ingest tab.",
+                )
+
+            if st.button("Render from Schema", type="primary", key="rfs_run"):
+                if _rfs_pptx is None or _rfs_schema_file is None:
+                    st.warning("Upload both the source PPTX and the semantic_schema.json.")
+                else:
+                    import json as _json
+
+                    try:
+                        _rfs_schema = _json.loads(_rfs_schema_file.getvalue().decode("utf-8"))
+                    except Exception as _je:
+                        st.error(f"Could not parse semantic_schema.json: {_je}")
+                        _rfs_schema = None
+
+                    if _rfs_schema is not None:
+                        try:
+                            from services.schema_to_decisions import (
+                                schema_to_decisions        as _s2d,
+                                schema_to_classifier_stubs as _s2c,
+                                validate_schema_vs_pptx    as _validate_counts,
+                            )
+                        except ImportError as _ie:
+                            st.error(f"services.schema_to_decisions not found: {_ie}")
+                            _s2d = None
+
+                        if _s2d is not None:
+                            with tempfile.TemporaryDirectory() as _rfs_tmp:
+                                _rfs_tmp_p = Path(_rfs_tmp)
+                                _rfs_src   = _rfs_tmp_p / _rfs_pptx.name
+                                _rfs_src.write_bytes(_rfs_pptx.getvalue())
+                                _rfs_out   = _rfs_tmp_p / _rfs_pptx.name.replace(".pptx", "_schema_FQ.pptx")
+                                _rfs_rlog  = _rfs_tmp_p / "render_log.json"
+                                _rfs_qa_p  = _rfs_tmp_p / "qa_report.json"
+
+                                with zipfile.ZipFile(_rfs_src) as _rfs_z:
+                                    _rfs_slide_count = sum(
+                                        1 for _k in _rfs_z.namelist()
+                                        if re.match(r"ppt/slides/slide\d+\.xml$", _k)
+                                    )
+
+                                try:
+                                    _validate_counts(_rfs_schema, _rfs_slide_count)
+                                except ValueError as _ve:
+                                    st.error(str(_ve))
+                                    _rfs_schema = None
+
+                                if _rfs_schema is not None:
+                                    try:
+                                        _rfs_decisions = _s2d(_rfs_schema)
+                                        _rfs_stubs     = _s2c(_rfs_schema)
+                                    except ValueError as _ve:
+                                        st.error(f"Schema translation error: {_ve}")
+                                        _rfs_decisions = None
+
+                                    if _rfs_decisions is not None:
+                                        with st.spinner("Rendering…"):
+                                            try:
+                                                _rfs_ren_log = _pl_render(
+                                                    _rfs_src, _rfs_decisions,
+                                                    _PIPELINE_MASTER, _rfs_out,
+                                                    output_log=_rfs_rlog,
+                                                )
+                                                _rfs_render_ok = True
+                                            except Exception as _re:
+                                                st.error(f"Render failed: {_re}")
+                                                _rfs_render_ok = False
+
+                                        if _rfs_render_ok:
+                                            with st.spinner("Validating…"):
+                                                try:
+                                                    _rfs_qa_report = _pl_qa(
+                                                        _rfs_out, _rfs_ren_log,
+                                                        _rfs_stubs,
+                                                        output_path=_rfs_qa_p,
+                                                    )
+                                                except Exception as _qe:
+                                                    st.warning(f"QA validation failed: {_qe}")
+                                                    _rfs_qa_report = None
+
+                                            st.success(f"Rendered {len(_rfs_decisions)} slides.")
+
+                                            if _rfs_out.exists():
+                                                st.download_button(
+                                                    label=f"Download {_rfs_out.name}",
+                                                    data=_rfs_out.read_bytes(),
+                                                    file_name=_rfs_out.name,
+                                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                                    key="rfs_dl",
+                                                )
+
+                                            if _rfs_qa_report:
+                                                _rqs = _rfs_qa_report.get("summary", {})
+                                                st.markdown(
+                                                    f"**QA:** {_rqs.get('pass', 0)} pass · "
+                                                    f"{_rqs.get('review', 0)} review · "
+                                                    f"{_rqs.get('fail', 0)} fail "
+                                                    f"({_rqs.get('total', 0)} slides)"
+                                                )
+                                                with st.expander("QA report", expanded=False):
+                                                    st.json(_rfs_qa_report)
+
+                                            with st.expander("Render log", expanded=False):
+                                                st.json(_rfs_ren_log)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1568,27 +1697,17 @@ with tab_palette:
             st.markdown(f'<div class="pal-grid">{tiles}</div>', unsafe_allow_html=True)
 
     else:
-        # Group every COLOR_REMAP entry by its target brand color so the map
-        # is always in sync with convert_deck.py — no hardcoded lists needed.
+        # Conversion Map — group COLOR_REMAP entries by target brand color
         _TARGET_ORDER = [
-            ("1D1D1D", "→ Guiding Grey"),
-            ("3B3B3B", "→ Grey 1"),
-            ("585858", "→ Grey 2"),
-            ("767676", "→ Grey 3"),
-            ("7A828D", "→ Grey Mid"),
-            ("B2BBCA", "→ Light Grey"),
-            ("D0D7DF", "→ Soft Grey"),
-            ("FFFFFF",  "→ White"),
-            ("281A42", "→ Vector Dark Purple"),
-            ("765FFF", "→ Pivot Purple"),
-            ("917FFF", "→ Purple Tint 1"),
-            ("AD9FFF", "→ Purple Tint 2"),
-            ("C8BFFF", "→ Purple Tint 3"),
-            ("E9E4FF", "→ Shift Lavender"),
-            ("00C27A", "→ Anchor Green"),
-            ("60BDBC", "→ Teal"),
-            ("FFB547", "→ Amber"),
-            ("FF2E88", "→ Signal Magenta"),
+            ("1D1D1D", "→ Guiding Grey"), ("3B3B3B", "→ Grey 1"),
+            ("585858", "→ Grey 2"), ("767676", "→ Grey 3"),
+            ("7A828D", "→ Grey Mid"), ("B2BBCA", "→ Light Grey"),
+            ("D0D7DF", "→ Soft Grey"), ("FFFFFF", "→ White"),
+            ("281A42", "→ Vector Dark Purple"), ("765FFF", "→ Pivot Purple"),
+            ("917FFF", "→ Purple Tint 1"), ("AD9FFF", "→ Purple Tint 2"),
+            ("C8BFFF", "→ Purple Tint 3"), ("E9E4FF", "→ Shift Lavender"),
+            ("00C27A", "→ Anchor Green"), ("60BDBC", "→ Teal"),
+            ("FFB547", "→ Amber"), ("FF2E88", "→ Signal Magenta"),
         ]
 
         def swatch_row(src_hex: str, tgt_hex: str) -> str:
@@ -1602,7 +1721,6 @@ with tab_palette:
                 f'</div>'
             )
 
-        # Build target → [sources] index
         _by_target: dict[str, list[str]] = {t: [] for t, _ in _TARGET_ORDER}
         for src, tgt in cd.COLOR_REMAP.items():
             if tgt in _by_target:
@@ -1614,27 +1732,16 @@ with tab_palette:
             if not srcs:
                 continue
             with cols[_ci % 3]:
-                st.markdown(
-                    f'<div class="section-label">{label}</div>',
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    "".join(swatch_row(s, tgt) for s in sorted(srcs)),
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f'<div class="section-label">{label}</div>', unsafe_allow_html=True)
+                st.markdown("".join(swatch_row(s, tgt) for s in sorted(srcs)), unsafe_allow_html=True)
 
         st.divider()
-        st.markdown(
-            '<div class="section-label">Scheme fill overrides</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="section-label">Scheme fill overrides</div>', unsafe_allow_html=True)
         scheme_html = "".join(
-            f'<div class="scheme-row">'
-            f'<code>{k}</code>'
+            f'<div class="scheme-row"><code>{k}</code>'
             f'<span class="arrow">→</span>'
             f'<span class="swatch" style="background:#{v};"></span>'
-            f'<code>#{v}</code>'
-            f'</div>'
+            f'<code>#{v}</code></div>'
             for k, v in cd.SCHEME_FILL_MAP.items()
         )
         st.markdown(scheme_html, unsafe_allow_html=True)
@@ -1895,132 +2002,6 @@ with tab_icons:
                 f'</div>',
                 unsafe_allow_html=True,
             )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — TYPOGRAPHY (hidden)
-# ══════════════════════════════════════════════════════════════════════════════
-if False:  # noqa — tab removed from nav; keep block for reference
-    pass
-if False:
-    import json as _json
-
-    # Type scale scraped from style_guide.json + master PPTX spec
-    # color_bg = the dark UI background color we render the sample against
-    TYPE_SCALE = [
-        {
-            "name": "Cover Title",
-            "font": "Segoe UI", "size_pt": 48, "weight": 700,
-            "color": "#FFFFFF", "bg": "#1D1D1D",
-            "sample": "The Science of Talent to Value",
-            "notes": "Segoe UI Bold · 48pt · White · Cover slides only",
-        },
-        {
-            "name": "Cover Subtitle",
-            "font": "Segoe UI", "size_pt": 28, "weight": 400,
-            "color": "#765FFF", "bg": "#1D1D1D",
-            "sample": "Transform decks at the speed of strategy",
-            "notes": "Segoe UI Regular · 28pt · Pivot Purple",
-        },
-        {
-            "name": "Section Title",
-            "font": "Segoe UI", "size_pt": 32, "weight": 700,
-            "color": "#FFFFFF", "bg": "#281A42",
-            "sample": "Section 01 — Talent Architecture",
-            "notes": "Segoe UI Bold · 32pt · White · Divider slides",
-        },
-        {
-            "name": "Slide Title",
-            "font": "Segoe UI", "size_pt": 28, "weight": 700,
-            "color": "#1D1D1D", "bg": "#FFFFFF",
-            "sample": "Organizational Efficiency",
-            "notes": "Segoe UI Bold · 28pt · Guiding Grey",
-        },
-        {
-            "name": "Slide Subtitle",
-            "font": "Segoe UI", "size_pt": 18, "weight": 700,
-            "color": "#765FFF", "bg": "#FFFFFF",
-            "sample": "Key findings across markets",
-            "notes": "Segoe UI Bold · 18pt · Pivot Purple",
-        },
-        {
-            "name": "Body",
-            "font": "Arial", "size_pt": 12, "weight": 400,
-            "color": "#1D1D1D", "bg": "#FFFFFF",
-            "sample": "Supporting detail that frames the core insight with context and precision across the organization.",
-            "notes": "Arial Regular · 12pt · Guiding Grey",
-        },
-        {
-            "name": "Body Small",
-            "font": "Arial", "size_pt": 10, "weight": 400,
-            "color": "#3B3B3B", "bg": "#FFFFFF",
-            "sample": "Secondary annotation or footnote text used below a data point or chart.",
-            "notes": "Arial Regular · 10pt · Grey 1",
-        },
-        {
-            "name": "Caption",
-            "font": "Arial", "size_pt": 8, "weight": 400,
-            "color": "#585858", "bg": "#FFFFFF",
-            "sample": "Source: FulcrumQ internal analysis, FY25 · All figures USD",
-            "notes": "Arial Regular · 8pt · Grey 2",
-        },
-        {
-            "name": "Table Header",
-            "font": "Segoe UI", "size_pt": 10, "weight": 600,
-            "color": "#FFFFFF", "bg": "#765FFF",
-            "sample": "CATEGORY  ·  OWNER  ·  STATUS  ·  TIMELINE",
-            "notes": "Segoe UI SemiBold · 10pt · White on Pivot Purple",
-        },
-        {
-            "name": "Table Body",
-            "font": "Arial", "size_pt": 9, "weight": 400,
-            "color": "#1D1D1D", "bg": "#FFFFFF",
-            "sample": "Talent acquisition  ·  Sarah Chen  ·  On track  ·  Q2 FY25",
-            "notes": "Arial Regular · 9pt · Guiding Grey",
-        },
-        {
-            "name": "Label",
-            "font": "Segoe UI", "size_pt": 9, "weight": 700,
-            "color": "#765FFF", "bg": "#1D1D1D",
-            "sample": "INITIATIVE  ·  PRIORITY  ·  IMPACT  ·  EFFORT",
-            "notes": "Segoe UI Bold · 9pt · Pivot Purple",
-        },
-    ]
-
-    st.markdown(
-        '<div class="section-label" style="margin-bottom:1rem;">Master type scale — sourced from LatestMaster_FQ</div>',
-        unsafe_allow_html=True,
-    )
-
-    for entry in TYPE_SCALE:
-        # Scale pt to approximate px for web display (cap at 3rem)
-        px = min(entry["size_pt"] * 1.2, 56)
-        fw = entry["weight"]
-        ff = f"'{entry['font']}', 'Inter', Arial, sans-serif"
-        fc = entry["color"]
-        bg = entry["bg"]
-
-        # Render sample on its authentic background color
-        sample_style = (
-            f"font-family:{ff};"
-            f"font-size:{px}px;"
-            f"font-weight:{fw};"
-            f"color:{fc};"
-            f"background:{bg};"
-            f"padding:8px 14px;"
-            f"border-radius:8px;"
-            f"line-height:1.2;"
-            f"display:block;"
-        )
-
-        st.markdown(
-            f'<div class="type-row">'
-            f'<div class="type-meta"><strong>{entry["name"]}</strong>{entry["notes"]}</div>'
-            f'<div class="type-sample"><span style="{sample_style}">{entry["sample"]}</span></div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — RAG
