@@ -1,0 +1,58 @@
+{
+  "source": "example_deck.pptx",
+  "slide_count": 3,
+  "slides": [
+    {
+      "slide_id": 1,
+      "detected_purpose": "cover",
+      "content_summary": "Cover slide for an organizational efficiency strategy review for Q2 2026.",
+      "key_entities": ["Organizational Efficiency", "Q2 2026"],
+      "structured_fields": {
+        "title": "Organizational Efficiency",
+        "subtitle": "Q2 2026 Strategy Review",
+        "deck_type": "strategy_review"
+      },
+      "confidence": 0.95,
+      "warnings": []
+    },
+    {
+      "slide_id": 2,
+      "detected_purpose": "content",
+      "content_summary": "Summary of key operational and financial findings including revenue growth, headcount reduction, and improved EBITDA margin.",
+      "key_entities": ["Revenue", "Headcount", "EBITDA"],
+      "structured_fields": {
+        "title": "Key Findings",
+        "metrics": [
+          {"label": "Revenue growth", "value": "15% YoY"},
+          {"label": "Headcount reduction", "value": "8%"},
+          {"label": "EBITDA margin", "value": "22%"}
+        ],
+        "content_type": "metrics_summary"
+      },
+      "confidence": 0.88,
+      "warnings": []
+    },
+    {
+      "slide_id": 3,
+      "detected_purpose": "content",
+      "content_summary": "Table tracking strategic initiatives with owner assignments and current status.",
+      "key_entities": ["Cost Reduction", "Revenue Growth", "Finance", "Sales"],
+      "structured_fields": {
+        "title": "Initiative Tracker",
+        "table_headers": ["Initiative", "Owner", "Status"],
+        "table_rows": [
+          {"Initiative": "Cost Reduction", "Owner": "Finance", "Status": "On Track"},
+          {"Initiative": "Revenue Growth", "Owner": "Sales",   "Status": "At Risk"}
+        ],
+        "content_type": "tracker_table"
+      },
+      "confidence": 0.91,
+      "warnings": []
+    }
+  ],
+  "failures": [],
+  "artifacts": {
+    "raw_extract":     "artifacts/raw_extract/example_deck.json",
+    "semantic_schema": "artifacts/semantic_schema/example_deck.json"
+  }
+}

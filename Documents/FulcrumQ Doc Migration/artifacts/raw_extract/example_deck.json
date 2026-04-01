@@ -1,0 +1,85 @@
+{
+  "source": "example_deck.pptx",
+  "slide_count": 3,
+  "slides": [
+    {
+      "slide_id": 1,
+      "raw_text": [
+        "Organizational Efficiency",
+        "Q2 2026 Strategy Review"
+      ],
+      "shapes": [
+        {
+          "shape_name": "Title 1",
+          "shape_type": "placeholder",
+          "placeholder_type": "ctrTitle",
+          "text": "Organizational Efficiency"
+        },
+        {
+          "shape_name": "Subtitle 2",
+          "shape_type": "placeholder",
+          "placeholder_type": "subTitle",
+          "text": "Q2 2026 Strategy Review"
+        }
+      ],
+      "tables": [],
+      "colors": ["765FFF", "1D1D1D"],
+      "layout_sig": "2sh|f|f|f"
+    },
+    {
+      "slide_id": 2,
+      "raw_text": [
+        "Key Findings",
+        "Revenue grew 15% YoY",
+        "Headcount reduced by 8%",
+        "EBITDA margin improved to 22%"
+      ],
+      "shapes": [
+        {
+          "shape_name": "Title 1",
+          "shape_type": "placeholder",
+          "placeholder_type": "title",
+          "text": "Key Findings"
+        },
+        {
+          "shape_name": "Content Placeholder 2",
+          "shape_type": "placeholder",
+          "placeholder_type": "body",
+          "text": "Revenue grew 15% YoY\nHeadcount reduced by 8%\nEBITDA margin improved to 22%"
+        }
+      ],
+      "tables": [],
+      "colors": ["FFFFFF", "765FFF"],
+      "layout_sig": "2sh|f|f|f"
+    },
+    {
+      "slide_id": 3,
+      "raw_text": [
+        "Initiative Tracker"
+      ],
+      "shapes": [
+        {
+          "shape_name": "Title 1",
+          "shape_type": "placeholder",
+          "placeholder_type": "title",
+          "text": "Initiative Tracker"
+        },
+        {
+          "shape_name": "Table 2",
+          "shape_type": "table",
+          "placeholder_type": null,
+          "text": "Initiative Owner Status | Cost Reduction Finance On Track | Revenue Growth Sales At Risk"
+        }
+      ],
+      "tables": [
+        [
+          ["Initiative", "Owner", "Status"],
+          ["Cost Reduction", "Finance", "On Track"],
+          ["Revenue Growth", "Sales", "At Risk"]
+        ]
+      ],
+      "colors": ["F2F2F2", "1D1D1D"],
+      "layout_sig": "1sh|T|f|f"
+    }
+  ]
+}

@@ -35,11 +35,17 @@ from pathlib import Path
 from lxml import etree
 
 BASE_DIR    = Path(__file__).parent
-MASTER_PPTX = BASE_DIR / "LatestMaster_FQ.potx"   # legacy fallback
 
-# Dual-master strategy
-# X = default (horizontal footer at bottom)
-MASTER_X = BASE_DIR / "FQ_PPTX_Theme_vF.pptx"
+_ONEDRIVE_MASTER = Path(
+    "/Users/zervolino/Library/CloudStorage"
+    "/OneDrive-SharedLibraries-CEOWorks"
+    "/Ming Yang - FulcrumQ Assests"
+    "/FulcrumQ PPTX - Master & Usage"
+    "/FulcrumQ Default Template.potx"
+)
+
+# Primary master: OneDrive potx; fall back to local copy if not mounted
+MASTER_X    = _ONEDRIVE_MASTER if _ONEDRIVE_MASTER.exists() else BASE_DIR / "FulcrumQ_Blank_Template.pptx"
 
 NS_A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
 NS_P   = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -473,6 +479,27 @@ COLOR_REMAP = {
     "E0DDE1": "D0D7DF",                       # light grey-purple → Soft Grey
 }
 
+# ── Semantic RAG remap ────────────────────────────────────────────────────────
+# Maps common source RAG colors → approved FulcrumQ equivalents.
+# Applied in _resolve_color() BEFORE the general COLOR_REMAP lookup so
+# semantic reds/ambers/greens route to on-brand equivalents rather than purple.
+# Only exact-match hex values are affected; unmapped RAG hues fall through to
+# the existing detect_rag_colors() preservation path.
+_RAG_REMAP: dict[str, str] = {
+    # Reds → approved FQ red (EA3323)
+    "FF0000": "EA3323", "C00000": "EA3323", "B4000C": "EA3323",
+    "BA0A2F": "EA3323", "BA0B2F": "EA3323", "EC0000": "EA3323",
+    "FF0001": "EA3323", "B02418": "EA3323", "AA2634": "EA3323",
+    "D12B1F": "EA3323", "CC0000": "EA3323", "E00000": "EA3323",
+    # Ambers → Momentum Amber (FFB547)
+    "FFC000": "FFB547", "FEAA12": "FFB547", "FCB913": "FFB547",
+    "FF6600": "FFB547", "E36C09": "FFB547", "FFA400": "FFB547",
+    "FFBF00": "FFB547", "FFA500": "FFB547",
+    # Greens → Anchor Green (00C27A)
+    "00B050": "00C27A", "70AD47": "00C27A", "548235": "00C27A",
+    "8CC53F": "00C27A", "92D050": "00C27A", "00B336": "00C27A",
+}
+
 # Target color for any custom red not already in COLOR_REMAP
 RED_REMAP_TARGET = "765FFF"
 
@@ -603,12 +630,24 @@ def _apply_scheme_transforms(base_hex: str, transforms) -> str:
     return _nearest_brand_color(result)
 
 
-def _resolve_color(v: str, rag_preserve: set) -> str | None:
+def _resolve_color(v: str, rag_preserve: set, has_text: bool = False) -> str | None:
     """Resolve a source hex to a brand target color.
-    Priority: RAG preserve → explicit COLOR_REMAP → red hue → nearest Lab match.
-    Never returns None — every color gets a brand equivalent."""
+
+    Priority:
+      1. RAG preserve set        → return None (keep original)
+      2. Semantic RAG remap      → approved RAG equivalent (skipped when has_text=True)
+      3. Explicit COLOR_REMAP    → mapped brand color
+      4. Red hue detection       → brand purple (RED_REMAP_TARGET)
+      5. Nearest Lab match       → closest brand color
+
+    has_text=True: shape contains visible text — treat as a content container,
+    not a semantic indicator. Skips _RAG_REMAP so reds route to purple instead
+    of approved semantic red (EA3323).
+    """
     if v in rag_preserve:
         return None
+    if not has_text and v in _RAG_REMAP:
+        return _RAG_REMAP[v]
     if v in COLOR_REMAP:
         return COLOR_REMAP[v]
     if _is_red_hue(v):
@@ -650,6 +689,24 @@ def _hue_bucket(hex_val: str):
         return "A"
     if 90 <= hue <= 170:
         return "G"
+    return None
+
+
+def _sp_has_visible_text(sp) -> bool:
+    """Return True if the shape contains at least one non-whitespace text run."""
+    for t in sp.iter(f"{{{NS_A}}}t"):
+        if t.text and t.text.strip():
+            return True
+    return False
+
+
+def _enclosing_sp(element):
+    """Walk up the parent chain and return the nearest <p:sp> ancestor, or None."""
+    node = element.getparent()
+    while node is not None:
+        if node.tag == f"{{{NS_P}}}sp":
+            return node
+        node = node.getparent()
     return None
 
 
@@ -791,8 +848,13 @@ def detect_rag_colors(slide_root):
         xfrms = [xf for _, _, xf in sp_fills]
         if not _shapes_uniform_and_linear(xfrms):
             continue
-        for _, hex_val, _ in sp_fills:
-            preserve.add(hex_val)
+        # Only preserve fills from shapes with NO visible text.
+        # Text-bearing shapes (labeled boxes, section headers) in the same group
+        # still satisfy the R/A/G detection above but their colour is left to the
+        # normal remap pipeline (→ EA3323 via _RAG_REMAP, not original source red).
+        for sp, hex_val, _ in sp_fills:
+            if not _sp_has_visible_text(sp):
+                preserve.add(hex_val)
 
     # (B) Gradient RAG shapes
     for sp in slide_root.iter(f"{{{NS_P}}}sp"):
@@ -2016,12 +2078,9 @@ def strip_footer_placeholders(slide_root, inject=True):
     nvPr    = etree.SubElement(nvSpPr, f"{{{NS_P}}}nvPr")
     ph_el   = etree.SubElement(nvPr, f"{{{NS_P}}}ph")
     ph_el.set("type", "sldNum"); ph_el.set("idx", "14")
+    # No explicit xfrm — let the layout placeholder govern position and size.
+    # An absent xfrm means "Reset Layout" in PowerPoint will not move the number.
     spPr    = etree.SubElement(sp, f"{{{NS_P}}}spPr")
-    xfrm    = etree.SubElement(spPr, f"{{{NS_A}}}xfrm")
-    off     = etree.SubElement(xfrm, f"{{{NS_A}}}off")
-    off.set("x", "5867400"); off.set("y", "6564276")
-    ext     = etree.SubElement(xfrm, f"{{{NS_A}}}ext")
-    ext.set("cx", "457200"); ext.set("cy", "128016")
     # txBody — copy master's bodyPr + lstStyle for correct font/color/size
     txBody  = etree.SubElement(sp, f"{{{NS_P}}}txBody")
     bodyPr  = etree.SubElement(txBody, f"{{{NS_A}}}bodyPr")
@@ -3319,7 +3378,11 @@ def style_slide(slide_root, slide_idx=None, layout_name=""):
         v = srgb.get("val", "").upper()
         if v in rag_preserve:
             continue
-        mapped = _resolve_color(v, rag_preserve)
+        # Determine if this colour belongs to a text-bearing shape so reds
+        # in content containers route to purple rather than approved RAG red.
+        enc_sp   = _enclosing_sp(srgb)
+        has_text = _sp_has_visible_text(enc_sp) if enc_sp is not None else False
+        mapped = _resolve_color(v, rag_preserve, has_text=has_text)
         if mapped is None:
             continue
         new_val = mapped
@@ -3451,13 +3514,106 @@ _TC_BORDER_TAGS = frozenset({
 _TABLE_HEADER_FILL  = "281A42"   # Vector Dark Purple
 _TABLE_HEADER_TEXT  = "FFFFFF"   # White
 
+# Bullet element tags that indicate non-tabular (layout) use
+_BULLET_TAGS = {
+    f"{{{NS_A}}}buChar",
+    f"{{{NS_A}}}buAutoNum",
+    f"{{{NS_A}}}buBlip",
+}
+
+def _tbl_cell_text(tc) -> str:
+    """Return all text in a table cell as a single stripped string."""
+    return "".join(t.text or "" for t in tc.iter(f"{{{NS_A}}}t")).strip()
+
+
+def _classify_table_role(tbl) -> str:
+    """Return 'data_table' or 'layout_table' for a <a:tbl> element.
+
+    layout_table heuristics (any one is sufficient):
+      - Single cell
+      - Single column (all rows have exactly one <a:tc>)
+      - Any cell paragraph contains a bullet element (buChar/buAutoNum/buBlip)
+      - Symbol/arrow column: any column where every cell contains ≤2 chars
+        (e.g. a '›' or '→' separator column in a comparison layout)
+      - First-row fill matches body rows: if the first row has no explicit
+        solidFill set in its cells, it was never intended as a styled header
+
+    Everything else is treated as data_table and gets header/band styling.
+    """
+    rows = tbl.findall(f"{{{NS_A}}}tr")
+    if not rows:
+        return "layout_table"
+
+    # Single cell
+    if len(rows) == 1 and len(rows[0].findall(f"{{{NS_A}}}tc")) == 1:
+        return "layout_table"
+
+    # Single column
+    if all(len(row.findall(f"{{{NS_A}}}tc")) == 1 for row in rows):
+        return "layout_table"
+
+    # Any bullet element anywhere in the table
+    for bullet_tag in _BULLET_TAGS:
+        if tbl.find(f".//{bullet_tag}") is not None:
+            return "layout_table"
+
+    # Symbol/arrow column: if any column has every cell containing ≤2 characters
+    # it is a separator/indicator column (›, →, ▶, etc.) — marks a layout table.
+    col_count = len(rows[0].findall(f"{{{NS_A}}}tc"))
+    for col_i in range(col_count):
+        col_cells = []
+        for row in rows:
+            tcs = row.findall(f"{{{NS_A}}}tc")
+            if col_i < len(tcs):
+                col_cells.append(tcs[col_i])
+        if col_cells and all(len(_tbl_cell_text(tc)) <= 2 for tc in col_cells):
+            return "layout_table"
+
+    # No explicit fill on first-row cells: the source did not style row 0 as a
+    # header, so we should not force one onto it.
+    first_row_cells = rows[0].findall(f"{{{NS_A}}}tc")
+    if first_row_cells:
+        any_fill = any(
+            tc.find(f"{{{NS_A}}}tcPr") is not None
+            and tc.find(f"{{{NS_A}}}tcPr").find(f"{{{NS_A}}}solidFill") is not None
+            for tc in first_row_cells
+        )
+        if not any_fill:
+            return "layout_table"
+
+    # Relative verbosity: real column headers are distinctly shorter than their
+    # body content. Compute the longest cell text in row 0 vs the longest cell
+    # text across all body rows. If the first row is in the same verbosity range
+    # (ratio > 0.55) it is carrying content, not labelling columns.
+    # This handles long questions in headers correctly: a 25-char question header
+    # with 80-char body cells → ratio 0.31 → data_table. A 46-char first-row
+    # content cell with 45-char body cells → ratio ~1.0 → layout_table.
+    if len(rows) > 1:
+        first_row_max = max(
+            (len(_tbl_cell_text(tc)) for tc in first_row_cells), default=0
+        )
+        body_max = max(
+            (len(_tbl_cell_text(tc))
+             for row in rows[1:]
+             for tc in row.findall(f"{{{NS_A}}}tc")),
+            default=0,
+        )
+        if body_max > 0 and (first_row_max / body_max) > 0.55:
+            return "layout_table"
+
+    return "data_table"
+
+
 def _style_table_header_rows(slide_root) -> int:
-    """Apply FulcrumQ header-row style to the first row of every table:
+    """Apply FulcrumQ header-row style to the first row of data tables only.
       · Cell fill: Vector Dark Purple (281A42)
       · Text:      white, bold
+    Layout tables (single-col, single-cell, bullet-bearing) are skipped.
     Returns the number of text runs styled."""
     count = 0
     for tbl in slide_root.iter(f"{{{NS_A}}}tbl"):
+        if _classify_table_role(tbl) != "data_table":
+            continue
         rows = tbl.findall(f"{{{NS_A}}}tr")
         if not rows:
             continue
@@ -3520,12 +3676,14 @@ _BAND_COLORS = ("F2F2F2", "FFFFFF")   # even rows, odd rows
 
 
 def _style_table_body_bands(slide_root) -> int:
-    """Apply alternating F2F2F2 / white fills to table body rows (rows 1+).
-    Cells that already carry an explicit solidFill are left untouched so
-    intentional categorical fills (e.g. RAG dots, accent rows) survive.
+    """Apply alternating F2F2F2 / white fills to body rows of data tables only.
+    Layout tables are skipped. Cells with an existing explicit solidFill
+    (RAG dots, accent rows) are left untouched.
     Returns the number of cells banded."""
     count = 0
     for tbl in slide_root.iter(f"{{{NS_A}}}tbl"):
+        if _classify_table_role(tbl) != "data_table":
+            continue
         rows = tbl.findall(f"{{{NS_A}}}tr")
         if len(rows) < 2:
             continue
@@ -3554,6 +3712,145 @@ def _style_table_body_bands(slide_root) -> int:
                         insert_idx = ci + 1
                 tcPr.insert(insert_idx, sf)
                 count += 1
+    return count
+
+
+# ── Kicker / label normalisation ─────────────────────────────────────────────
+# Short standalone text near the title region that carries a stray bullet
+# glyph (e.g. "• Illustrative", "▪ Summary") is cleaned: the leading glyph is
+# stripped from the run text and any buChar/buFont elements are removed from the
+# paragraph's pPr.  Only free-form shapes (not placeholders), single-paragraph,
+# ≤80 chars, inside the title region are touched.
+
+_KICKER_BULLET_GLYPHS = {"•", "▪", "‣", "–", "—", "›", "»", "·"}
+
+def _normalize_kicker_labels(slide_root) -> int:
+    """Strip stray bullet glyphs from short standalone text near the title region.
+    Returns count of paragraphs modified."""
+    count = 0
+    spTree = slide_root.find(f".//{{{NS_P}}}spTree")
+    if spTree is None:
+        return 0
+
+    for sp in spTree.iter(f"{{{NS_P}}}sp"):
+        # Must be a free-form shape, not a placeholder
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None:
+            continue
+
+        # Must be in the title region (y < 1.5 in)
+        xfrm = sp.find(f".//{{{NS_A}}}xfrm")
+        off  = xfrm.find(f"{{{NS_A}}}off") if xfrm is not None else None
+        if off is None:
+            continue
+        try:
+            y_emu = int(off.get("y", "9999999999"))
+        except ValueError:
+            continue
+        if y_emu >= _TITLE_REGION_EMU:
+            continue
+
+        txBody = sp.find(f"{{{NS_P}}}txBody")
+        if txBody is None:
+            continue
+
+        paragraphs = txBody.findall(f"{{{NS_A}}}p")
+        # Single-paragraph shapes only
+        if len(paragraphs) != 1:
+            continue
+
+        p = paragraphs[0]
+        full_text = "".join(t.text or "" for t in p.iter(f"{{{NS_A}}}t")).strip()
+        if not full_text or len(full_text) > 80:
+            continue
+
+        pPr = p.find(f"{{{NS_A}}}pPr")
+        has_bu_char  = pPr is not None and pPr.find(f"{{{NS_A}}}buChar") is not None
+        has_glyph    = full_text[0] in _KICKER_BULLET_GLYPHS
+
+        if not (has_bu_char or has_glyph):
+            continue
+
+        # Strip buChar / buFont from pPr
+        if pPr is not None:
+            for tag in (f"{{{NS_A}}}buChar", f"{{{NS_A}}}buFont",
+                        f"{{{NS_A}}}buClr",  f"{{{NS_A}}}buClrTx"):
+                for el in list(pPr.findall(tag)):
+                    pPr.remove(el)
+            # Suppress any inherited bullet with explicit buNone
+            if pPr.find(f"{{{NS_A}}}buNone") is None:
+                # Insert buNone before tabLst/defRPr/extLst
+                _AFTER = {f"{{{NS_A}}}tabLst", f"{{{NS_A}}}defRPr", f"{{{NS_A}}}extLst"}
+                ins = next((i for i, c in enumerate(pPr) if c.tag in _AFTER), len(list(pPr)))
+                pPr.insert(ins, etree.Element(f"{{{NS_A}}}buNone"))
+
+        # Strip leading glyph character from first run text
+        if has_glyph:
+            for r in p.findall(f"{{{NS_A}}}r"):
+                t_el = r.find(f"{{{NS_A}}}t")
+                if t_el is not None and t_el.text:
+                    stripped = t_el.text.lstrip("".join(_KICKER_BULLET_GLYPHS)).lstrip()
+                    if stripped != t_el.text:
+                        t_el.text = stripped
+                        break
+
+        count += 1
+    return count
+
+
+# ── Bullet normalisation ──────────────────────────────────────────────────────
+# Normalises unordered bullets inside body placeholders only.
+# Skips:  numbered lists (buAutoNum), symbol/checkmark glyphs.
+# Applies: consistent glyph (•), marL 342 900 EMU, hanging indent −342 900 EMU.
+
+_SKIP_BULLET_GLYPHS = {"✓", "✗", "✔", "✘", "☐", "☑", "►", "▶", "→", "⇒"}
+_NORM_BULLET_GLYPH  = "•"
+_BULLET_MARGIN_L    = "342900"   # 0.375 in
+_BULLET_INDENT      = "-342900"  # hanging
+
+def _normalize_bullets(slide_root) -> int:
+    """Normalise unordered bullet geometry in body placeholders.
+    Returns count of paragraphs touched."""
+    count = 0
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is None:
+            continue
+        # Body placeholder only (idx != title/subtitle types)
+        ph_type = ph.get("type", "body")
+        if ph_type in ("title", "ctrTitle", "subTitle", "sldNum", "dt", "ftr"):
+            continue
+
+        txBody = sp.find(f"{{{NS_P}}}txBody")
+        if txBody is None:
+            continue
+
+        for p in txBody.findall(f"{{{NS_A}}}p"):
+            pPr = p.find(f"{{{NS_A}}}pPr")
+            if pPr is None:
+                continue
+
+            # Skip numbered lists
+            if pPr.find(f"{{{NS_A}}}buAutoNum") is not None:
+                continue
+
+            bu_char = pPr.find(f"{{{NS_A}}}buChar")
+            if bu_char is None:
+                continue
+
+            # Skip symbol/checkmark glyphs
+            glyph = bu_char.get("char", "")
+            if glyph in _SKIP_BULLET_GLYPHS:
+                continue
+
+            # Normalise glyph
+            bu_char.set("char", _NORM_BULLET_GLYPH)
+
+            # Normalise indent geometry
+            pPr.set("marL", _BULLET_MARGIN_L)
+            pPr.set("indent", _BULLET_INDENT)
+
+            count += 1
     return count
 
 
@@ -3779,7 +4076,7 @@ def ordered_slides(file_map):
 def convert(source_path: Path):
     output_path = source_path.parent / (source_path.stem + "_fq.pptx")
 
-    primary_master = MASTER_X if MASTER_X.exists() else MASTER_PPTX
+    primary_master = MASTER_X
 
     print(f"\nSource : {source_path.name}")
     print(f"Master : {primary_master.name}")
@@ -3916,6 +4213,14 @@ def convert(source_path: Path):
         if n_cased:   parts.append(f"{n_cased} title(s) sentence-cased")
         if parts:
             print(f"         styled : {', '.join(parts)}")
+
+        n_kicker = _normalize_kicker_labels(slide_root)
+        if n_kicker:
+            print(f"         kicker   : {n_kicker} label(s) bullet-stripped")
+
+        n_bullets = _normalize_bullets(slide_root)
+        if n_bullets:
+            print(f"         bullets  : {n_bullets} paragraph(s) normalised")
 
         n_pics = recolor_pics(slide_root, slide_w, slide_h)
         if n_pics:

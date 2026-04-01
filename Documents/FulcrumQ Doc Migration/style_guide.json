@@ -1,0 +1,171 @@
+{
+  "_comment": "FulcrumQ Brand Style Guide — source of truth for master PPTX builder",
+
+  "colors": {
+    "white":            "#FFFFFF",
+    "pivot_purple":     "#765FFF",
+    "guiding_grey":     "#1D1D1D",
+    "pivot_tint_1":     "#917FFF",
+    "pivot_tint_2":     "#AD9FFF",
+    "pivot_tint_3":     "#C8BFFF",
+    "grey_tint_1":      "#3B3B3B",
+    "grey_tint_2":      "#585858",
+    "grey_tint_3":      "#767676",
+    "grey":             "#7A828D",
+    "light_grey":       "#B2BBCA",
+    "soft_grey":        "#D0D7DF",
+    "vector_dark_purple": "#2B3A42",
+    "anchor_green":       "#00C27A",
+    "momentum_amber":     "#ABD9FE",
+    "hot_lilac":          "#C14BFF",
+    "signal_magenta":     "#FF2E8B",
+    "shift_lavender":     "#ABD9FE"
+  },
+
+  "gradient": {
+    "_comment": "Pivot line: #1D1D1D → #765FFF left-to-right; triangle at 66% point",
+    "start": "#1D1D1D",
+    "end":   "#765FFF",
+    "_names": "guiding_grey → pivot_purple",
+    "triangle_position": 0.66
+  },
+
+  "typography": {
+    "headline": {
+      "family":   "Segoe UI",
+      "weights":  ["Regular", "SemiBold", "Bold", "Black"],
+      "fallback": "Segoe UI"
+    },
+    "body": {
+      "family":   "Arial",
+      "weights":  ["Regular", "Medium", "ExtraBold"],
+      "fallback": "Arial"
+    }
+  },
+
+  "type_scale": {
+    "cover_title":    { "size_pt": 48, "weight": "Bold",    "font": "Segoe UI", "color": "guiding_grey"  },
+    "cover_subtitle": { "size_pt": 28, "weight": "Regular", "font": "Segoe UI", "color": "pivot_purple" },
+    "slide_title":    { "size_pt": 28, "weight": "Bold",    "font": "Segoe UI", "color": "guiding_grey"  },
+    "slide_subtitle": { "size_pt": 18, "weight": "Bold",    "font": "Segoe UI", "color": "pivot_purple"  },
+    "section_title":  { "size_pt": 32, "weight": "Bold",    "font": "Segoe UI", "color": "white"         },
+    "body":           { "size_pt": 12, "weight": "Regular", "font": "Arial", "color": "guiding_grey"  },
+    "body_small":     { "size_pt": 10, "weight": "Regular", "font": "Arial", "color": "grey_tint_1"   },
+    "caption":        { "size_pt":  8, "weight": "Regular", "font": "Arial", "color": "grey_tint_2"   },
+    "table_header":   { "size_pt": 10, "weight": "SemiBold","font": "Segoe UI", "color": "white"         },
+    "table_body":     { "size_pt":  9, "weight": "Regular", "font": "Arial", "color": "guiding_grey"  },
+    "label":          { "size_pt":  9, "weight": "Bold",    "font": "Segoe UI", "color": "pivot_purple"  }
+  },
+
+  "layout": {
+    "slide_width_in":   13.333,
+    "slide_height_in":   7.5,
+    "margin_left_in":    0.492,
+    "margin_right_in":   0.492,
+    "margin_top_in":     0.394,
+    "margin_bottom_in":  0.394,
+    "title_top_in":      0.394,
+    "title_height_in":   1.0,
+    "content_top_in":    1.5,
+    "body_text_indent_in": 0.098
+  },
+
+  "logo": {
+    "_comment": "All paths relative to this style_guide.json file",
+    "primary_default":       "logo package/PNG/primary logo_default.png",
+    "primary_reverse":       "logo package/PNG/primary logo_reverse.png",
+    "primary_tagline_default": "logo package/PNG/primary logo + tagline_default.png",
+    "primary_tagline_reverse": "logo package/PNG/primary logo + tagline_reverse.png",
+    "monogram_default":      "logo package/PNG/monogram_default.png",
+    "monogram_reverse":      "logo package/PNG/monogram_reverse.png",
+    "triangle_default":      "logo package/PNG/triangle_default.png",
+    "triangle_reverse":      "logo package/PNG/triangle_reverse.png",
+
+    "placement": {
+      "cover":       { "logo": "primary_tagline_default", "position": "upper_left",  "width_in": 2.5  },
+      "slide_light": { "logo": "monogram_default",        "position": "upper_right", "width_in": 0.45 },
+      "slide_dark":  { "logo": "monogram_reverse",        "position": "upper_right", "width_in": 0.45 },
+      "divider":     { "logo": "primary_reverse",         "position": "lower_left",  "width_in": 1.8  }
+    }
+  },
+
+  "slide_layouts": [
+    {
+      "name": "Cover",
+      "background": "anchor",
+      "logo": "cover",
+      "placeholders": ["title", "subtitle"],
+      "chrome": ["pivot_line"]
+    },
+    {
+      "name": "Section Divider",
+      "background": "anchor",
+      "logo": "divider",
+      "placeholders": ["title"],
+      "chrome": ["pivot_line"]
+    },
+    {
+      "name": "Title + Body",
+      "background": "white",
+      "logo": "slide_light",
+      "placeholders": ["title", "body"],
+      "chrome": ["bottom_rule"]
+    },
+    {
+      "name": "Title + Two Column",
+      "background": "white",
+      "logo": "slide_light",
+      "placeholders": ["title", "body_left", "body_right"],
+      "chrome": ["bottom_rule"]
+    },
+    {
+      "name": "Title + Table",
+      "background": "white",
+      "logo": "slide_light",
+      "placeholders": ["title", "table"],
+      "chrome": ["bottom_rule"]
+    },
+    {
+      "name": "Title + Bullets",
+      "background": "white",
+      "logo": "slide_light",
+      "placeholders": ["title", "body_bulleted"],
+      "chrome": ["bottom_rule"]
+    },
+    {
+      "name": "Title + Image",
+      "background": "white",
+      "logo": "slide_light",
+      "placeholders": ["title", "picture"],
+      "chrome": ["bottom_rule"]
+    },
+    {
+      "name": "Full Bleed Image",
+      "background": "image",
+      "logo": "slide_dark",
+      "placeholders": ["title", "subtitle"],
+      "chrome": ["overlay_panel"]
+    },
+    {
+      "name": "Quote",
+      "background": "soft_grey",
+      "logo": "slide_light",
+      "placeholders": ["body"],
+      "chrome": ["pivot_accent"]
+    },
+    {
+      "name": "Thank You",
+      "background": "anchor",
+      "logo": "cover",
+      "placeholders": ["title", "subtitle"],
+      "chrome": ["pivot_line"]
+    },
+    {
+      "name": "Blank",
+      "background": "white",
+      "logo": null,
+      "placeholders": [],
+      "chrome": []
+    }
+  ]
+}

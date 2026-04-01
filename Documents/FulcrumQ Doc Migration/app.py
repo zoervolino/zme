@@ -956,7 +956,7 @@ with tab_convert:
 
     # ── Convert mode ──────────────────────────────────────────────────────────
     if _cmode == "Convert":
-        master_exists = cd.MASTER_X.exists() or cd.MASTER_PPTX.exists()
+        master_exists = cd.MASTER_X.exists()
 
         uploaded = st.file_uploader(
             "Upload source PPTX",
