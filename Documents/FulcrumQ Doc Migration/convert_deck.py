@@ -33,19 +33,11 @@ import zipfile
 from copy import deepcopy
 from pathlib import Path
 from lxml import etree
+from agent_color_pass import agent_color_prepass
 
 BASE_DIR    = Path(__file__).parent
 
-_ONEDRIVE_MASTER = Path(
-    "/Users/zervolino/Library/CloudStorage"
-    "/OneDrive-SharedLibraries-CEOWorks"
-    "/Ming Yang - FulcrumQ Assests"
-    "/FulcrumQ PPTX - Master & Usage"
-    "/FulcrumQ Default Template.potx"
-)
-
-# Primary master: OneDrive potx; fall back to local copy if not mounted
-MASTER_X    = _ONEDRIVE_MASTER if _ONEDRIVE_MASTER.exists() else BASE_DIR / "FulcrumQ_Blank_Template.pptx"
+MASTER_X = BASE_DIR / "FulcrumQ Default Template.potx"
 
 NS_A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
 NS_P   = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -891,13 +883,13 @@ LAYOUT_SEMANTIC = [
     ("thank",    "Ending_PivotPurple"),
     ("ending",   "Ending_PivotPurple"),
     ("blank",    "Blank_Light"),
-    ("subtitle", "Content_Light_Sub"),
-    ("two col",  "Content_Light"),
-    ("dark",     "1_Content_Dark"),    # vF has no plain Content_Dark
+    ("subtitle", "Light_Sub"),
+    ("two col",  "Title_Only_Light"),
+    ("dark",     "Title_Only_Dark"),
 ]
 
 # Default layout when no semantic match — general content slide
-DEFAULT_LAYOUT = "Content_Light"
+DEFAULT_LAYOUT = "Title_Only_Light"
 
 # Content-scan thresholds for layout override
 _SPARSE_TEXT_THRESHOLD  = 80   # total chars below this = sparse/title-only slide
@@ -905,6 +897,150 @@ _HEAVY_SHAPE_COUNT      = 4    # non-ph shapes above this = content-heavy slide
 _HEAVY_TEXT_THRESHOLD   = 120  # body placeholder chars above this = content-heavy
 
 EMU = 914400  # 1 inch in EMU
+
+_AGENT_RELAY_URL = "https://anyquest-webhook-relay-production-863f.up.railway.app"
+
+
+def _agent_detect_title(slide_image_path):
+    """
+    Sends a rasterized slide PNG to the vision-capable AnyQuest agent.
+    Returns a dict with title, subtitle, slide_type, confidence, reason,
+    and color_semantics — or None on any failure.
+    """
+    try:
+        import requests as _req
+        import json as _json
+        import websocket as _ws
+        from PIL import Image as _Img
+        import io as _io
+    except ImportError:
+        return None
+
+    try:
+        import base64 as _b64
+        img = _Img.open(slide_image_path)
+        if img.width > 480:
+            _h = int(img.height * 480 / img.width)
+            img = img.resize((480, _h), _Img.LANCZOS)
+        buf = _io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=60)
+        _img_b64 = _b64.standard_b64encode(buf.getvalue()).decode()
+
+        prompt = (
+            f"[image/jpeg;base64]\n{_img_b64}\n[/image]\n\n"
+            "You are a presentation slide designer analyzing a slide image.\n\n"
+            "Look at the slide carefully and return ONLY the following JSON — no preamble, "
+            "no explanation, no markdown:\n\n"
+            "{\n"
+            '  "title": "exact title text visible on slide",\n'
+            '  "subtitle": "exact subtitle text or null if none",\n'
+            '  "slide_type": "cover|divider|content|ending",\n'
+            '  fidence": 0.0-1.0,\n'
+            '  "reason": "one sentence explaining title identification",\n'
+            '  "color_semantics": [\n'
+            '    {\n'
+            '      "description": "brief description of where this element is on the slide",\n'
+            '      "semantic": "rag_indicator|rating_scale|legend|gradient_slider|status_dot|brand_decorative|icon|diagram|chart",\n'
+            '      "action": "preserve_original|remap_to_purple|interpolate_gradient"\n'
+            '    }\n'
+            '  ]\n'
+            "}\n\n"
+            "TITLE rules:\n"
+            "- The title is the most prominent heading — largest or boldest text, usually near the top\n"
+            "- Do not return bullet points, body text, footer text, or slide numbers as the title\n"
+            "- If no clear title exists, return null\n\n"
+            "SUBTITLE rules:\n"
+            "- The subtitle is smaller supporting text directly below or near the title\n"
+            "- It provides context, a date, a client name, or arief descriptor\n"
+            "- NOT bullets, NOT body content, NOT footer, NOT copyright\n"
+            "- If no subtitle exists, return null\n\n"
+            "SLIDE TYPE rules:\n"
+            "- cover: opening/title slide, usually slide 1, large title, minimal body content\n"
+            "- divider: section break, bold background color, just a section title, no body bullets\n"
+            "- content: body slide with bullets, charts, tables, diagrams, or data\n"
+            "- ending: closing slide — thank you, questions, contact info\n\n"
+            "COLOR SEMANTICS rules — identify every group of colored elements:\n"
+            "- rag_indicator: explicit red/amber/green traffic light system (3 shapes spanning R/A/G hues)\n"
+            "- rating_scale: colored dots or shapes in a column/row next to list items, indicating status per item (e.g. green dot = good, red dot = at risk)\n"
+            "- legend: color swatches with text labels explaining what each color means\n"
+            "- gradient_sl: a horizontal or vertical bar that transitions through multiple colors (e.g. dark → amber → green spectrum)\n"
+            "- status_dot: a single isolated colored dot or circle indicating the status of one specific item\n"
+            "- brand_decorative: a colored shape, band, or rectangle that is purely visual/structural with no semantic meaning\n"
+            "- icon: an icon, illustration, or small graphic — color is part of the artwork\n"
+            "- diagram: a flowchart, org chart, process diagram, or structured graphic — preserve all colors\n"
+            "- chart: a data chart or graph — preserve series colors\n\n"
+            "Action rules for color_semantics:\n"
+            "- rag_indicator, rating_scale, legend, gradient_slider, status_dot → preserve_original (these colors convey meaning, do not remap)\n"
+            "- brand_decorative → remap_to_purple (these are decorative and should be rebranded)\n"
+            "- icon, diagram, chart → preserve_original (these are contenot alter)\n"
+            "- gradient_slider → interpolate_gradient (preserve endpoints, mathematically interpolate middle stops)\n\n"
+            "If no semantic color elements are visible on this slide, return an empty array [] for color_semantics.\n\n"
+            "IMPORTANT: Return only the JSON object. Do not copy field names as values. "
+            "Do not return placeholder text. Start your response with { and end with }."
+        )
+
+        resp = _req.post(
+            f"{_AGENT_RELAY_URL}/submit",
+            files={
+                "agentId": (None, "generic-prompt-agent"),
+                "Prompt":  (None, prompt),
+            },
+            timeout=30,
+        )
+
+        if not resp.ok:
+            print(f"         [agent-title] /submit {resp.status_code}", flush=True)
+            return None
+
+        result = resp.json()
+        if not result.get('success'):
+            return None
+
+        conn = _ws.create_connection(
+            f"wss://anyquest-webhook-relay-production-863f.up.railway.app/ws?id={result['webhookId']}",
+            timeout=120,
+        )
+        msg  = conn.recv()
+        conn.close()
+
+        content = _json.loads(msg)['content']
+
+        # Extract first complete JSON object by brace matching
+        start = content.find('{')
+        if start == -1:
+            print(f"         [agent-title] no JSON in response: {content[:100]}", flush=True)
+            return None
+        depth, end = 0, -1
+        for idx, ch in enumerate(content[start:], start):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = idx + 1
+                    break
+        if end == -1:
+            print(f"         [agent-title] unclosed JSON: {content[:100]}", flush=True)
+            return None
+
+        parsed = _json.loads(content[start:end])
+
+        # Guard against echoed template / bad responses
+        title = parsed.get('title', '') or ''
+        bad_values = {
+            'null', 'none', 'exact title text visible on slide',
+            'exact title text', 'the title text',
+        }
+        if title.lower().strip() in bad_values or len(title.strip()) < 2:
+            print(f"         [agent-title] bad response: {content[:100]}", flush=True)
+            return None
+
+        return parsed
+
+    except Exception as _e:
+        print(f"         [agent-title] failed: {_e}", flush=True)
+        return None
+
 
 # ── SVG media color remap ─────────────────────────────────────────────────────
 SVG_COLOR_REMAP = {
@@ -1411,21 +1547,40 @@ def _scan_slide_content(slide_root):
     )
 
 
+def _validate_subtitle(text: str):
+    """Return text if it is a valid subtitle, else None.
+
+    Rejects empty strings, bullet-started lines, multi-line content, and
+    ALL-CAPS kicker labels (≤5 words).
+    """
+    if not text or not text.strip():
+        return None
+    t = text.strip()
+    if t.startswith(("-", "•", "·", "*", "–", "—")):
+        return None
+    if "\n" in t or len(t.splitlines()) > 1:
+        return None
+    words = t.split()
+    if len(words) <= 5 and t == t.upper() and any(c.isalpha() for c in t):
+        return None
+    return t
+
+
 def resolve_layout(old_name, v7_name_map, slide_root=None,
-                   slide_idx: int = 0, total_slides: int = 0):
+                   slide_idx: int = 0, total_slides: int = 0,
+                   agent_hint: dict = None):
     """
     Pick the best FulcrumQ layout for a slide.
 
     1. Exact match on old layout name → use as-is (covers already-branded decks)
     2. Semantic match via LAYOUT_SEMANTIC substrings
-    3. Default to Content_Light
+    3. Default to Title_Only_Light
 
     Content scan (when slide_root is provided) can override the semantic pick:
     - Slide 1 with no body content → Cover_Light
     - Last slide with thank-you text → Ending_PivotPurple
-    - Cover_Light / Title_Only_Light with heavy content → Content_Light
-    - Content_Light with sparse content (title-only) → Title_Only_Light
     Dark variants follow the same rules (preserve Dark when explicitly dark).
+    Content_Light / 1_Content_Dark are never selected — use Title_Only or Sub variants.
     """
     # ── Step 1: exact name match ───────────────────────────────────────────────
     if old_name in v7_name_map:
@@ -1443,6 +1598,45 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
     if matched_layout is None:
         matched_layout = DEFAULT_LAYOUT
         matched_label  = f"→ {DEFAULT_LAYOUT}"
+
+    # ── Subtitle detection (agent-only) ───────────────────────────────────────
+    has_subtitle = bool(
+        agent_hint
+        and agent_hint.get("subtitle") is not None
+        and _validate_subtitle(agent_hint.get("subtitle", "")) is not None
+    )
+
+    # ── Agent early return ────────────────────────────────────────────────────
+    # If agent ran successfully, use its signals directly — bypass content scan.
+    # Exceptions: Dividers, Endings, and Covers are still detected structurally.
+    if agent_hint is not None and slide_root is not None:
+        # Divider: trust semantic match if it resolved to a divider layout
+        if matched_layout in ("Divider_Dark", "Divider_Light", "Divider_Crystal"):
+            layout_path = v7_name_map.get(matched_layout)
+            if layout_path:
+                return layout_path, f"{matched_label} (layout name → divider, preserved)"
+
+        # Ending: last slide with thank-you keywords
+        if total_slides > 0 and slide_idx >= total_slides - 1:
+            _slide_text = " ".join(
+                t.text or "" for t in slide_root.iter(f"{{{NS_A}}}t")
+            ).lower()
+            if any(kw in _slide_text for kw in ("thank", "question", "contact", "connect")):
+                if "Ending_PivotPurple" in v7_name_map:
+                    return v7_name_map["Ending_PivotPurple"], f"agent → Ending_PivotPurple"
+
+        is_dark = _bg_is_dark(_slide_bg_hex(slide_root))
+        if is_dark:
+            name = "Dark_Sub" if has_subtitle else "Title_Only_Dark"
+        else:
+            name = "Light_Sub" if has_subtitle else "Title_Only_Light"
+        # Cover exception: slide 1 gets Cover layout
+        if slide_idx == 1:
+            cover = "Cover_Dark" if is_dark else "Cover_Light"
+            if cover in v7_name_map:
+                name = cover
+        if name in v7_name_map:
+            return v7_name_map[name], f"agent → {name}"
 
     # ── Step 3: content-scan override ─────────────────────────────────────────
     # If the semantic match already resolved to a Divider, trust it — the source
@@ -1490,19 +1684,7 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
             if override in v7_name_map:
                 return v7_name_map[override], f"{matched_label} →scan→ {override} (colored block)"
 
-        # Cover or Title-only picked, but slide has real body content → content layout
-        if matched_layout in ("Cover_Light", "Cover_Dark",
-                               "Title_Only_Light", "Title_Only_Dark") and is_heavy:
-            override = "1_Content_Dark" if is_dark else "Content_Light"
-            if override in v7_name_map:
-                return v7_name_map[override], f"{matched_label} →scan→ {override}"
-
-        # Content layout picked, but slide is sparse (just a title) → title-only
-        if matched_layout in ("Content_Light", "1_Content_Dark",
-                               DEFAULT_LAYOUT) and is_sparse:
-            override = "Title_Only_Dark" if is_dark else "Title_Only_Light"
-            if override in v7_name_map:
-                return v7_name_map[override], f"{matched_label} →scan→ {override}"
+        # (Content_Light / 1_Content_Dark are never selected — removed from all paths)
 
     layout_path = v7_name_map.get(matched_layout)
     if layout_path:
@@ -1534,16 +1716,21 @@ def remap_slide_layout(file_map, slide_path, v7_layout_path):
 
 
 # ── STEP 2b: Title promotion ─────────────────────────────────────────────────
-def promote_slide_title(slide_root):
+def promote_slide_title(slide_root, title_hint=None):
     """
-    If a slide has no title/ctrTitle placeholder, find the first content
-    placeholder (body type with text) and promote it to title type.
-    - Strips its explicit xfrm so it inherits the layout's title position/size.
+    If a slide has no title/ctrTitle placeholder, find the best candidate and
+    promote it to title type.
+    - If title_hint is provided, the shape whose text contains the hint is
+      preferred over heuristic ordering.
+    - Strips xfrm so the layout's title position/size is inherited.
     - Strips bullet formatting so the title style applies cleanly.
     Returns True if a promotion was made.
     """
     FOOTER_TYPES = {"sldNum", "dt", "ftr"}
     TITLE_TYPES  = {"title", "ctrTitle"}
+
+    def _shape_text(sp):
+        return " ".join(t.text or "" for t in sp.iter(f"{{{NS_A}}}t")).strip()
 
     spTree = slide_root.find(f".//{{{NS_P}}}spTree")
     if spTree is None:
@@ -1554,6 +1741,25 @@ def promote_slide_title(slide_root):
         ph = sp.find(f".//{{{NS_P}}}ph")
         if ph is not None and ph.get("type", "body") in TITLE_TYPES:
             return False
+
+    # If agent provided a title hint, try to find matching shape first
+    if title_hint:
+        _hint_norm = title_hint.strip().lower()
+        for sp in spTree.findall(f"{{{NS_P}}}sp"):
+            ph = sp.find(f".//{{{NS_P}}}ph")
+            if ph is not None and ph.get("type", "body") in FOOTER_TYPES | TITLE_TYPES:
+                continue
+            if ph is None:
+                continue
+            if _hint_norm in _shape_text(sp).lower():
+                # Promote directly
+                ph.set("type", "title")
+                ph.attrib.pop("idx", None)
+                spPr = sp.find(f"{{{NS_P}}}spPr")
+                if spPr is not None:
+                    for xfrm in spPr.findall(f"{{{NS_A}}}xfrm"):
+                        spPr.remove(xfrm)
+                return True
 
     # Find first body-type ph with actual text content
     for sp in spTree.findall(f"{{{NS_P}}}sp"):
@@ -1671,57 +1877,9 @@ def split_title_subtitle(slide_root):
             break
 
     if br_para_idx is None:
-        # ── Inline-pipe fallback ─────────────────────────────────────────────────
-        # Single paragraph with "Title text | Subtitle text" — pipe as separator.
-        # Example: "FUTURE JOBS TO BE DONE & RISKS | CHIEF DIGITAL OFFICER"
-        if len(paragraphs) >= 1:
-            para0 = paragraphs[0]
-            full_text = "".join(t.text or "" for t in para0.iter(f"{{{NS_A}}}t"))
-            pipe_idx = None
-            for sep in (" | ", "| ", " |"):
-                idx_ = full_text.find(sep)
-                if idx_ != -1:
-                    pipe_idx = idx_
-                    sep_len  = len(sep)
-                    break
-            if pipe_idx is not None:
-                title_text_raw  = full_text[:pipe_idx].strip()
-                sub_text_raw    = full_text[pipe_idx + sep_len:].strip()
-                if title_text_raw and sub_text_raw:
-                    # Rewrite title paragraph runs to contain only title text
-                    for r in list(para0.findall(f"{{{NS_A}}}r")):
-                        para0.remove(r)
-                    new_r = etree.SubElement(para0, f"{{{NS_A}}}r")
-                    etree.SubElement(new_r, f"{{{NS_A}}}t").text = title_text_raw
-                    # Build subtitle shape
-                    max_id = max(
-                        (int(el.get("id", 0)) for el in slide_root.iter(f"{{{NS_P}}}cNvPr")),
-                        default=100,
-                    )
-                    sub_sp  = etree.SubElement(spTree, f"{{{NS_P}}}sp")
-                    nvSpPr  = etree.SubElement(sub_sp, f"{{{NS_P}}}nvSpPr")
-                    cNvPr   = etree.SubElement(nvSpPr, f"{{{NS_P}}}cNvPr")
-                    cNvPr.set("id", str(max_id + 1)); cNvPr.set("name", "SubtitleSplit")
-                    cNvSpPr = etree.SubElement(nvSpPr, f"{{{NS_P}}}cNvSpPr")
-                    etree.SubElement(cNvSpPr, f"{{{NS_A}}}spLocks").set("noGrp", "1")
-                    nvPr    = etree.SubElement(nvSpPr, f"{{{NS_P}}}nvPr")
-                    ph_el   = etree.SubElement(nvPr, f"{{{NS_P}}}ph")
-                    ph_el.set("type", "subTitle"); ph_el.set("idx", "1")
-                    spPr2   = etree.SubElement(sub_sp, f"{{{NS_P}}}spPr")
-                    etree.SubElement(spPr2, f"{{{NS_A}}}noFill")
-                    sub_tx  = etree.SubElement(sub_sp, f"{{{NS_P}}}txBody")
-                    etree.SubElement(sub_tx, f"{{{NS_A}}}bodyPr")
-                    etree.SubElement(sub_tx, f"{{{NS_A}}}lstStyle")
-                    new_p   = etree.SubElement(sub_tx, f"{{{NS_A}}}p")
-                    sub_r   = etree.SubElement(new_p, f"{{{NS_A}}}r")
-                    etree.SubElement(sub_r, f"{{{NS_A}}}t").text = sub_text_raw
-                    etree.SubElement(new_p, f"{{{NS_A}}}endParaRPr").set("lang", "en-US")
-                    return [sub_text_raw]
-
         # ── Multi-paragraph fallback ────────────────────────────────────────────
         # No soft return, but title has ≥2 non-empty paragraphs:
         #   paragraph 0 = title, paragraph 1+ = subtitle
-        # Also covers "Title | Subtitle" styled as two separate paragraphs.
         non_empty = [p for p in paragraphs
                      if "".join(t.text or "" for t in p.iter(f"{{{NS_A}}}t")).strip()]
         if len(non_empty) < 2:
@@ -1845,11 +2003,10 @@ def split_title_subtitle(slide_root):
 
 # Layout upgrade map for subtitle-detected slides
 _SUB_LAYOUT_MAP = {
-    "Content_Light":    "Content_Light_Sub",
-    "Content_Dark":     "Content_Dark_Sub",
-    "Title_Only_Light": "Content_Light_Sub",
-    "Title_Only_Dark":  "Content_Dark_Sub",
-    "1_Content_Dark":   "Content_Dark_Sub",
+    "Cover_Light":      "Light_Sub",
+    "Cover_Dark":       "Dark_Sub",
+    "Title_Only_Light": "Light_Sub",
+    "Title_Only_Dark":  "Dark_Sub",
 }
 
 
@@ -2077,7 +2234,7 @@ def strip_footer_placeholders(slide_root, inject=True):
     etree.SubElement(cNvSpPr, f"{{{NS_A}}}spLocks").set("noGrp", "1")
     nvPr    = etree.SubElement(nvSpPr, f"{{{NS_P}}}nvPr")
     ph_el   = etree.SubElement(nvPr, f"{{{NS_P}}}ph")
-    ph_el.set("type", "sldNum"); ph_el.set("idx", "14")
+    ph_el.set("type", "sldNum"); ph_el.set("idx", "4")
     # No explicit xfrm — let the layout placeholder govern position and size.
     # An absent xfrm means "Reset Layout" in PowerPoint will not move the number.
     spPr    = etree.SubElement(sp, f"{{{NS_P}}}spPr")
@@ -2132,7 +2289,7 @@ def _strip_all_decorative(spTree, keep=None):
         spTree.remove(child)
 
 
-def lift_text_into_placeholders(slide_root, layout_name):
+def lift_text_into_placeholders(slide_root, layout_name, title_hint=None):
     """
     For Cover and Divider slides: extract title (and subtitle for Cover) text
     into proper placeholders, then clear the canvas so the FulcrumQ master
@@ -2244,6 +2401,14 @@ def lift_text_into_placeholders(slide_root, layout_name):
                         key=lambda x: (x[0], x[1]), reverse=True)
     if not candidates:
         return 0
+
+    # If agent provided a title hint, bubble the matching candidate to the front
+    if title_hint:
+        _hint_norm = title_hint.strip().lower()
+        for _ci, (_fs, _ar, _sp) in enumerate(candidates):
+            if _hint_norm in _shape_text(_sp).lower():
+                candidates.insert(0, candidates.pop(_ci))
+                break
 
     _, _, best = candidates[0]
     remaining  = [sp for (_, _, sp) in candidates[1:]]
@@ -2424,10 +2589,10 @@ def _stamp(lat_el, typeface):
 def style_rpr(rPr):
     lat = rPr.find(f"{{{NS_A}}}latin")
     if lat is None:
-        # Bold runs with no explicit font → make Aileron explicit for consistency
+        # Bold runs with no explicit font → Arial (body context; titles never reach here)
         if rPr.get("b") == "1":
             lat = etree.SubElement(rPr, f"{{{NS_A}}}latin")
-            _stamp(lat, "Segoe UI")
+            _stamp(lat, "Arial")
             return True
         return False
     tf = lat.get("typeface","")
@@ -2435,7 +2600,8 @@ def style_rpr(rPr):
         return False
     is_bold = rPr.get("b") == "1"
     if tf in BOLD_UPGRADE and is_bold:
-        _stamp(lat, "Segoe UI")
+        # Body bold — stay Arial; Segoe UI Bold is reserved for title placeholders
+        _stamp(lat, "Arial")
         return True
     if tf in FONT_MAP:
         brand, force_b = FONT_MAP[tf]
@@ -2443,17 +2609,19 @@ def style_rpr(rPr):
         if force_b is True:   rPr.set("b","1")
         elif force_b is False: rPr.attrib.pop("b",None)
         return True
-    if tf in ("Segoe UI","Arial"):
-        _stamp(lat, tf)
+    if tf in ("Segoe UI", "Arial"):
+        # Segoe UI in body context → Arial; Arial stays Arial
+        _stamp(lat, "Arial")
+        return True
     return False
 
 
 TITLE_PH_TYPES = {"title", "ctrTitle", "subTitle"}
 
 # Vertical threshold for position-based title detection on non-placeholder shapes.
-# Anything whose top edge sits above 1.5 in (content_top_in from style guide) is
-# treated as a heading and gets Segoe UI Bold.  1 in = 914 400 EMU.
-_TITLE_REGION_EMU = int(1.5 * 914_400)  # 1 371 600
+# Only fires when no confirmed title placeholder exists on the slide.
+# Top edge must be within the top 0.5 in to be treated as a heading.  1 in = 914 400 EMU.
+_TITLE_REGION_EMU = int(0.5 * 914_400)  # 457 200
 
 _TITLE_SZ_CAP  = 3600   # 36pt — cap explicit title font sizes to prevent oversized headings
 _SUBTITLE_SZ_CAP = 2400  # 24pt — cap subtitle sizes
@@ -3287,6 +3455,58 @@ def enforce_text_contrast(slide_root, rag_preserve: set) -> int:
                 continue   # no explicit cell fill — leave inherited colors alone
             _enforce_runs(tc, _bg_is_dark(cell_fill))
 
+    n += _enforce_contrast_final_sweep(slide_root, rag_preserve)
+    return n
+
+
+def _enforce_contrast_final_sweep(slide_root, rag_preserve: set) -> int:
+    """Post-pass: catch any shape where fill and text colors both ended up dark or
+    both light after independent remapping.
+
+    Luminance thresholds:
+      < 128 → dark   (matches _BG_DARK_THRESHOLD)
+      > 180 → light  (high-end of mid-tones; anything above is clearly light)
+
+    Never overrides colors in _FONT_ACCENT_PRESERVE or rag_preserve.
+    """
+    def _lum(hex6: str) -> float:
+        try:
+            r, g, b = int(hex6[0:2], 16), int(hex6[2:4], 16), int(hex6[4:6], 16)
+            return 0.299 * r + 0.587 * g + 0.114 * b
+        except Exception:
+            return 128.0  # unknown → treat as mid, skip
+
+    n = 0
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        fill_hex = _shape_fill_hex(sp)
+        if fill_hex is None:
+            continue
+        fill_lum = _lum(fill_hex)
+
+        for tag in (f"{{{NS_A}}}rPr", f"{{{NS_A}}}endParaRPr", f"{{{NS_A}}}defRPr"):
+            for rPr in sp.iter(tag):
+                sf = rPr.find(f"{{{NS_A}}}solidFill")
+                if sf is None:
+                    continue
+                srgb = sf.find(f"{{{NS_A}}}srgbClr")
+                if srgb is None:
+                    continue
+                text_hex = srgb.get("val", "").upper()
+                if not text_hex or len(text_hex) != 6:
+                    continue
+                if text_hex in rag_preserve or text_hex in _FONT_ACCENT_PRESERVE:
+                    continue
+                text_lum = _lum(text_hex)
+
+                if fill_lum < 128 and text_lum < 128:
+                    # Both dark — text invisible on dark fill
+                    _set_rpr_color(rPr, "FFFFFF")
+                    n += 1
+                elif fill_lum > 180 and text_lum > 180:
+                    # Both light — text invisible on light fill
+                    _set_rpr_color(rPr, "1D1D1D")
+                    n += 1
+                # else: adequate contrast — leave alone
     return n
 
 
@@ -3306,7 +3526,12 @@ def style_slide(slide_root, slide_idx=None, layout_name=""):
 
     # Placeholder shapes — titles get Segoe UI Bold + sentence case, body gets style_rpr.
     # Non-placeholder shapes (free text boxes, callouts, etc.) use vertical position:
-    # top < 1.5 in → title region → Segoe UI Bold; otherwise → Arial via FONT_MAP.
+    # top < 0.5 in → title region → Segoe UI Bold; only when no title ph exists on slide.
+    _has_title_ph = any(
+        sp.find(f".//{{{NS_P}}}ph") is not None and
+        sp.find(f".//{{{NS_P}}}ph").get("type", "") in ("title", "ctrTitle")
+        for sp in slide_root.iter(f"{{{NS_P}}}sp")
+    )
     for sp in slide_root.iter(f"{{{NS_P}}}sp"):
         ph = sp.find(f".//{{{NS_P}}}ph")
         if ph is not None:
@@ -3316,10 +3541,13 @@ def style_slide(slide_root, slide_idx=None, layout_name=""):
             is_title    = ph_type in TITLE_PH_TYPES and not is_subtitle
         else:
             is_subtitle = False
-            xfrm = sp.find(f".//{{{NS_A}}}xfrm")
-            off  = xfrm.find(f"{{{NS_A}}}off") if xfrm is not None else None
-            y_emu = int(off.get("y", "9999999999")) if off is not None else 9999999999
-            is_title = y_emu < _TITLE_REGION_EMU
+            if _has_title_ph:
+                is_title = False
+            else:
+                xfrm  = sp.find(f".//{{{NS_A}}}xfrm")
+                off   = xfrm.find(f"{{{NS_A}}}off") if xfrm is not None else None
+                y_emu = int(off.get("y", "9999999999")) if off is not None else 9999999999
+                is_title = y_emu < _TITLE_REGION_EMU
         # Font stamp: skip for Cover/Divider/Ending phs — master owns typography.
         # Casing still applies everywhere.
         if not (ph is not None and _MASTER_OWNS_PH):
@@ -4073,7 +4301,7 @@ def ordered_slides(file_map):
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
-def convert(source_path: Path):
+def convert(source_path: Path, forced_layouts: dict = None):
     output_path = source_path.parent / (source_path.stem + "_fq.pptx")
 
     primary_master = MASTER_X
@@ -4112,6 +4340,18 @@ def convert(source_path: Path):
     slides = ordered_slides(file_map)
     print(f"\n[2-4] Processing {len(slides)} slides…\n")
 
+    # Rasterize source deck once for agent_color_prepass (per-slide PNGs).
+    # Failures are non-fatal — agent detection is simply skipped.
+    _slide_pngs: list = []
+    try:
+        import tempfile as _tf
+        from slide_vision import rasterize_pptx as _sv_rasterize
+        _ras_tmp = _tf.mkdtemp(prefix="fq_ras_")
+        _slide_pngs = _sv_rasterize(source_path, Path(_ras_tmp))
+        print(f"  Rasterized {len(_slide_pngs)} slide image(s) for agent title detection.")
+    except Exception as _re:
+        print(f"  Rasterization skipped ({_re}) — agent title detection disabled.")
+
     total_vestiges = 0
     total_fonts    = 0
     total_colors   = 0
@@ -4127,24 +4367,58 @@ def convert(source_path: Path):
             continue
         slide_root = etree.fromstring(slide_bytes)
 
-        v7_layout, match = resolve_layout(
-            old_name, x_name_map, slide_root,
-            slide_idx=i, total_slides=len(slides),
-        )
-        v7_num = re.search(r"slideLayout(\d+)\.xml$", v7_layout).group(1)
-        v7_layout_name = next(
-            (k for k, v in x_name_map.items() if v == v7_layout), ""
-        )
-        remap_slide_layout(file_map, spath, v7_layout)
+        # ── Forced layout (user-designated from Guided Convert UI) ───────────────
+        _forced_name = (forced_layouts or {}).get(i)
+        if _forced_name and _forced_name in x_name_map:
+            v7_layout      = x_name_map[_forced_name]
+            v7_layout_name = _forced_name
+            v7_num         = re.search(r"slideLayout(\d+)\.xml$", v7_layout).group(1)
+            remap_slide_layout(file_map, spath, v7_layout)
+            print(f"  slide{i:2d}: '{old_name}' [forced → {_forced_name}] → layout{v7_num} [{_forced_name}]")
+            _det        = None
+            _agent_hint = None
+        else:
+            # Agent title/subtitle detection — runs before resolve_layout so subtitle
+            # info can inform layout choice.
+            _det        = _agent_detect_title(_slide_pngs[i - 1]) if _slide_pngs and i <= len(_slide_pngs) else None
+            _agent_hint = None
+            if _det:
+                _agent_hint = _det.get("title")
+                _conf = _det.get("confidence", 0)
+                _sub  = _det.get("subtitle")
+                print(
+                    f'         Agent title: "{_agent_hint}" (confidence: {_conf:.2f})'
+                    + (f'  subtitle: "{_sub}"' if _sub else ""),
+                    flush=True,
+                )
 
-        print(f"  slide{i:2d}: '{old_name}' [{match}] → layout{v7_num} [{v7_layout_name}]")
+            # Use vision color semantics to expand rag_preserve
+            if _det and _det.get('color_semantics'):
+                for _cs in _det['color_semantics']:
+                    if _cs.get('action') == 'preserve_original':
+                        print(f"         vision-color: preserving {_cs.get('semantic','?')} — {_cs.get('description','')[:60]}", flush=True)
+                # Flag for style_slide — actual hex preservation happens via detect_rag_colors
+                # which is geometry-based. Vision result is logged for now and will drive
+                # shape-level preservation once shape ID matching is added.
+
+            v7_layout, match = resolve_layout(
+                old_name, x_name_map, slide_root,
+                slide_idx=i, total_slides=len(slides),
+                agent_hint=_det,
+            )
+            v7_num = re.search(r"slideLayout(\d+)\.xml$", v7_layout).group(1)
+            v7_layout_name = next(
+                (k for k, v in x_name_map.items() if v == v7_layout), ""
+            )
+            remap_slide_layout(file_map, spath, v7_layout)
+            print(f"  slide{i:2d}: '{old_name}' [{match}] → layout{v7_num} [{v7_layout_name}]")
 
         # Lift text from decorative shapes into placeholders (Cover/Divider slides)
-        n_lifted = lift_text_into_placeholders(slide_root, v7_layout_name)
+        n_lifted = lift_text_into_placeholders(slide_root, v7_layout_name, title_hint=_agent_hint)
         if n_lifted:
             print(f"         lifted  : text from decorative shape → title placeholder")
 
-        promoted = promote_slide_title(slide_root)
+        promoted = promote_slide_title(slide_root, title_hint=_agent_hint)
         if promoted:
             print(f"         promoted: body ph → title")
 
@@ -4162,7 +4436,7 @@ def convert(source_path: Path):
             )
             for sp in slide_root.iter(f"{{{NS_P}}}sp")
         )
-        if subtitle_parts or has_existing_subtitle_ph:
+        if (subtitle_parts or has_existing_subtitle_ph) and not _forced_name:
             sub_layout_name = _SUB_LAYOUT_MAP.get(v7_layout_name)
             if sub_layout_name and sub_layout_name in x_name_map:
                 v7_layout      = x_name_map[sub_layout_name]
@@ -4178,12 +4452,13 @@ def convert(source_path: Path):
             print(f"         snapped : {n_snapped} subtitle-vibe ph(s) → layout position")
 
         bullet_promoted = promote_bullet_txbox(slide_root, file_map, spath)
-        if bullet_promoted:
-            body_layout = x_name_map.get("Content_Light")
+        if bullet_promoted and not _forced_name:
+            body_layout = x_name_map.get("Title_Only_Light")
             if body_layout:
                 body_num = re.search(r"slideLayout(\d+)\.xml$", body_layout).group(1)
                 remap_slide_layout(file_map, spath, body_layout)
-                print(f"         bullet txBox → body ph, layout → {body_num} (Title & Body)")
+                v7_layout_name = "Title_Only_Light"
+                print(f"         bullet txBox → body ph, layout → {body_num} (Title_Only_Light)")
 
         n_footer = strip_footer_placeholders(slide_root, inject=(i > 1))
         if n_footer:
@@ -4193,6 +4468,14 @@ def convert(source_path: Path):
         if removed:
             print(f"         removed: {removed}")
             total_vestiges += len(removed)
+
+        # Agent color semantics pre-pass
+        _color_map = agent_color_prepass(str(_slide_pngs[i - 1]) if _slide_pngs and i - 1 < len(_slide_pngs) else None, slide_root)
+        if _color_map.get("has_semantic_color_system"):
+            rag_preserve = rag_preserve | _color_map.get("preserve_original_shapes", set())
+            print(f"         color-agent: {len(_color_map.get('preserve_original_shapes', set()))} shape(s) preserved, "
+                  f"{len(_color_map.get('interpolate_gradient_shapes', set()))} gradient(s) flagged "
+                  f"(confidence: {_color_map.get('confidence', 0):.0%})")
 
         convert_scheme_fills(slide_root)
 

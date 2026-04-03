@@ -114,10 +114,14 @@ def _find_soffice() -> Optional[str]:
 
 
 def rasterize_pptx(pptx_path: Path, out_dir: Path) -> list[Path]:
-    """Convert PPTX → one PNG per slide using LibreOffice.
+    """Convert PPTX → one PNG per slide.
+
+    Strategy:
+      1. LibreOffice converts PPTX → PDF (all pages, reliable on macOS).
+      2. pymupdf renders each PDF page → slide_NNN.png in out_dir.
 
     Returns a list of PNG paths sorted by slide number.
-    Raises RuntimeError if LibreOffice is not found or conversion fails.
+    Raises RuntimeError if LibreOffice or pymupdf is not available.
     """
     soffice = _find_soffice()
     if soffice is None:
@@ -126,29 +130,42 @@ def rasterize_pptx(pptx_path: Path, out_dir: Path) -> list[Path]:
             "Expected path: /Applications/LibreOffice.app"
         )
 
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        raise RuntimeError(
+            "pymupdf not found. Install with: pip install pymupdf"
+        )
+
     pptx_path = Path(pptx_path).resolve()
     out_dir   = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Step 1: PPTX → PDF
     result = subprocess.run(
-        [soffice, "--headless", "--convert-to", "png",
+        [soffice, "--headless", "--convert-to", "pdf",
          "--outdir", str(out_dir), str(pptx_path)],
         capture_output=True, text=True, timeout=180,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"LibreOffice conversion failed:\n{result.stderr}")
+        raise RuntimeError(f"LibreOffice PDF conversion failed:\n{result.stderr}")
 
-    # LibreOffice outputs: <stem>-001.png, <stem>-002.png, ...
-    # (single-slide files may have no number suffix)
-    stem = pptx_path.stem
-    numbered = sorted(
-        out_dir.glob(f"{stem}-*.png"),
-        key=lambda p: int(m.group(1)) if (m := re.search(r"-(\d+)$", p.stem)) else 0,
-    )
-    if numbered:
-        return numbered
-    # Fallback: any png in out_dir
-    return sorted(out_dir.glob("*.png"))
+    pdf_path = out_dir / (pptx_path.stem + ".pdf")
+    if not pdf_path.exists():
+        raise RuntimeError(f"Expected PDF not found: {pdf_path}")
+
+    # Step 2: PDF → per-page PNGs via pymupdf
+    doc  = fitz.open(str(pdf_path))
+    pngs = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        pix  = page.get_pixmap(dpi=96)
+        out_path = out_dir / f"slide_{page_num + 1:03d}.png"
+        pix.save(str(out_path))
+        pngs.append(out_path)
+    doc.close()
+
+    return pngs
 
 
 # ── Pass 1: per-slide vision ──────────────────────────────────────────────────

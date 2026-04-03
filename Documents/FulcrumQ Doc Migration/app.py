@@ -16,6 +16,13 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+# ── Auto-install optional dependencies ────────────────────────────────────────
+try:
+    import websocket  # noqa: F401
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "websocket-client"],
+                   check=True, capture_output=True)
+
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -938,8 +945,8 @@ st.markdown(f"""
 <div class="fq-pivot-line"></div>
 """, unsafe_allow_html=True)
 
-_tab_labels = ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  RAG  ", "  Semantic Ingest  "]
-tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_semantic = st.tabs(_tab_labels)
+_tab_labels = ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  RAG  ", "  Semantic Ingest  ", "  Guided Convert  "]
+tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_semantic, tab_guided = st.tabs(_tab_labels)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -948,7 +955,7 @@ tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_semantic = st.tabs(
 with tab_convert:
     _cmode = st.radio(
         "_cmode",
-        ["Convert", "Pipeline", "Brand Check", "Render from Schema"],
+        ["Convert", "Pipeline", "Brand Check", "Visual Ingest Test"],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -1455,134 +1462,390 @@ with tab_convert:
                                         unsafe_allow_html=True,
                                     )
 
-    # ── Render from Schema mode ───────────────────────────────────────────────
-    elif _cmode == "Render from Schema":
-        if not _PIPELINE_AVAILABLE:
-            st.error("Pipeline unavailable — renderer.py / qa_validator.py not found.")
-        elif not (_PIPELINE_MASTER and _PIPELINE_MASTER.exists()):
-            st.error(f"Master PPTX not found: {_PIPELINE_MASTER}")
-        else:
-            st.caption(
-                "Bypass classification — upload a source PPTX and its semantic_schema.json "
-                "to render directly from the schema."
+    # ── Visual Ingest Test mode ────────────────────────────────────────────────
+    elif _cmode == "Visual Ingest Test":
+
+        _VIT_RELAY_URL = "https://anyquest-webhook-relay-production-863f.up.railway.app"
+
+        _VIT_PROMPT_TMPL = (
+            "You are a presentation slide designer. You will receive a rasterized image "
+            "of a slide (base64 PNG) and its cleaned XML structure.\n\n"
+            "Your job is to re-render this slide as clean, brand-compliant HTML that "
+            "faithfully represents the slide's content and visual intent.\n\n"
+            "═══════════════════════════════════════\n"
+            "FULCRUMQ BRAND GUIDELINES — APPLY EXACTLY\n\n"
+            "Canvas: 1280×720px (16:9), fixed size, no scrolling\n\n"
+            "COLORS — use only these values\n"
+            "- Pivot Purple: #765FFF (primary brand, 15–20% of surface area)\n"
+            "- Vector Dark Purple: #281A42 (dark backgrounds — dividers, section slides)\n"
+            "- Guiding Grey: #1D1D1D (primary text on light backgrounds)\n"
+            "- Grey 1: #3B3B3B\n"
+            "- Grey 2: #585858\n"
+            "- Grey 3: #767676\n"
+            "- Grey Mid: #7A828D\n"
+            "- Light Grey: #B2BBCA\n"
+            "- Soft Grey: #D0D7DF\n"
+            "- Lightest Grey: #F2F2F2\n"
+            "- White: #FFFFFF\n"
+            "- Anchor Green: #00C27A (accent only, max 3–5% surface)\n"
+            "- Momentum Amber: #FFB547 (accent only)\n"
+            "- Talent Teal: #60BDBC (accent only)\n"
+            "- Signal Magenta: #FF2E88 (accent only)\n"
+            "- Resistance Red: #EA3323 (RAG only)\n"
+            "- Light Lavender: #E9E4FF\n"
+            "- Tint 1: #917FFF / Tint 2: #AD9FFF / Tint 3: #C8BFFF\n\n"
+            "COLOR USAGE RULES\n"
+            "- Light slides: white/lightest grey background, Guiding Grey text\n"
+            "- Dark slides (dividers, section breaks): #281A42 background, white text\n"
+            "- Pivot Purple used for titles on light slides, key callout numbers, accent elements\n"
+            "- Accent colors (green, amber, teal, magenta) sparingly for data callouts only\n"
+            "- NEVER use colors not in the palette above\n\n"
+            "TYPOGRAPHY — use exact CSS font-family values as shown\n"
+            "- Slide title: font-family: 'Segoe UI', sans-serif; font-weight: bold; font-size: 28px; color #1D1D1D on light / #FFFFFF on dark\n"
+            "- Subtitle: font-family: 'Segoe UI', sans-serif; font-weight: normal; font-size: 20px; same color as title\n"
+            "- Body bullets (level 1): font-family: Arial, sans-serif; font-size: 20px; color #3B3B3B\n"
+            "- Body bullets (level 2): font-family: Arial, sans-serif; font-size: 18px; color #3B3B3B\n"
+            "- Body bullets (level 3+): font-family: Arial, sans-serif; font-size: 16px; color #3B3B3B\n"
+            "- Section labels / kickers: font-family: Arial, sans-serif; font-size: 12px; color #765FFF; text-transform: uppercase; letter-spacing: 0.08em\n"
+            "- Table headers: font-family: Arial, sans-serif; font-weight: bold; font-size: 12px; color #FFFFFF; background #281A42\n"
+            "- Table body: font-family: Arial, sans-serif; font-size: 12px; alternating #F2F2F2 / #FFFFFF rows\n"
+            "- Stat callouts (large numbers): font-family: 'Segoe UI', sans-serif; font-weight: bold; font-size: 48–64px; color #765FFF or accent\n"
+            "Apply these as inline styles or a <style> block — do not rely on browser defaults.\n\n"
+            "BULLET STYLE\n"
+            "- Bullet glyph: small filled triangle ▲ in Pivot Purple (#765FFF)\n"
+            "- Left-align all body text\n"
+            "- Indent nested bullets proportionally\n\n"
+            "LAYOUT RULES BY SLIDE TYPE\n"
+            "- Cover (light): white/lightest grey bg, large bold title top-left, subtitle below, FulcrumQ logo bottom-left\n"
+            "- Cover (dark): #281A42 bg, white title, white subtitle\n"
+            "- Divider/Section: #281A42 bg, large bold white title bottom-left, lighter subtitle below it, thin purple line bottom-right with small triangle\n"
+            "- Content (light): white bg, bold dark title top-left, subtitle below title, content in main body area\n"
+            "- Ending: Pivot Purple (#765FFF) bg, large white bold title, white subtitle\n\n"
+            "FOOTER (all content slides)\n"
+            "- Bottom-left: FULCRUMQ wordmark in black (light slides) or white (dark slides)\n"
+            "- Bottom-center: '© 2026 | All Rights Reserved' in Grey Mid, 8px\n"
+            "- Bottom-center: slide number in Grey Mid, 8px\n"
+            "- Bottom-right: thin horizontal line + small filled triangle in Pivot Purple\n\n"
+            "TABLES\n"
+            "- Header row: #281A42 fill, white bold Arial 12px text\n"
+            "- Body rows: alternating #F2F2F2 and #FFFFFF\n"
+            "- Left-align all body cell text\n"
+            "- All borders: 1px #D0D7DF\n\n"
+            "═══════════════════════════════════════\n\n"
+            "LAYOUT COMPOSITION RULES\n"
+            "Before writing any HTML, mentally divide the slide into zones based on what you see in the XML. Every content region must have a defined zone — nothing should float or overlap awkwardly. Apply these rules:\n"
+            "- Use CSS Grid or flexbox to create the layout — never use absolute positioning for content blocks\n"
+            "- All content must fit within 1280×720px without overflow or scrolling — scale font sizes down if needed to make everything fit\n"
+            "- Numbered sections (1, 2, 3 etc) must all be visible and consistently positioned — if you see 3 numbered items in the source, all 3 must appear in the output\n"
+            "- When a stat callout ($236M etc) sits next to a diagram, they must be in the same row as explicit siblings with defined widths — not stacked or floating\n"
+            "- Treat the layout like a grid: identify columns and rows first, then place content into them\n"
+            "- Leave breathing room between zones — padding minimum 16px between distinct content regions\n"
+            "- The overall composition should feel balanced — if the source has left content + right diagram, the HTML must mirror that split explicitly with a two-column layout\n\n"
+            "RENDERING RULES\n"
+            "- Use only visible content from the image — do not invent content\n"
+            "- Identify the correct semantic role of each element from VISUAL SIZE AND POSITION, not XML tag\n"
+            "- The title is the largest or most visually prominent text on the slide, almost always in the top portion. Even if the XML tags it as a body placeholder, if it is visually the biggest text and positioned at the top, it is the title. Render it as an <h1> with font-family: 'Segoe UI', sans-serif; font-weight: bold; minimum font-size: 28px.\n"
+            "- If the slide contains a screenshot of a table or chart, extract the data from it and render as a native HTML table or chart\n"
+            "- If the slide contains a diagram, flowchart, or process visual that cannot be reconstructed from text alone, do NOT use a placeholder. Instead render your best interpretation as native HTML and CSS — use divs, flexbox, borders, arrows (→ or CSS borders), and colored boxes to approximate the structure. It does not need to be pixel-perfect; it needs to convey the same information and visual logic. Only use a placeholder as an absolute last resort if the diagram is completely illegible from the XML.\n"
+            "- If the slide is too visually broken to salvage, set data-mode=\"redesign\" on the root div and rebuild from scratch using the correct layout template above\n"
+            "- Otherwise set data-mode=\"correct\" on the root div\n"
+            "- Preserve all visible text exactly as written — do not paraphrase or summarize\n"
+            "- Output only the HTML for the slide content, no explanation, no markdown, no preamble, no <html>/<body> wrapper tags — just the inner div\n\n"
+            "CONTENT FIDELITY RULES\n"
+            "You must reproduce ALL visible content from the slide, not a summary of it. If section 2 has a data table with numbers like 9250, 7775, 16%, those exact numbers must appear as a native HTML table. If a section contains a screenshot of a complex diagram, render a simplified but structurally faithful version of it in HTML — do not replace it with a single stat or leave it blank. The three content columns must together fill the full 1280×720 canvas from top to bottom — if they look sparse, increase font sizes, increase card padding, or expand diagram elements until the space is used. Loss of content is always wrong. A slide that is too full is better than a slide that is half empty.\n\n"
+            "CONTENT COMPLETENESS RULES\n"
+            "Before writing any HTML, audit every visible content region in the XML and make a list of everything you can see. For each region, count how many distinct elements are present — a table and a callout stat are two elements, not one. A complex diagram with two sides is one element but must be rendered at full complexity.\n"
+            "- If a region contains a table with data, render the full table with all visible rows, columns, and values — never replace it with a single summary stat\n"
+            "- If a region contains both a diagram/screenshot AND separate text or numbers below it, both must appear in the output as separate elements\n"
+            "- If a diagram has a two-part structure (before/after, today/tomorrow, left/right comparison), render both parts with their labels and internal content — a simplified single-column version is not acceptable\n"
+            "- If you can read text inside a screenshot or diagram, that text must appear in your HTML reconstruction\n"
+            "- If you can read the numbers in a data element but cannot clearly read the labels beneath them, use the column headers from the table as the labels instead — never invent descriptive labels. For example, if the table had headers 'Current (#)', 'Future (#)', 'Reduction (%)' and values 9250, 7775, 16%, those exact headers and values must appear together as a table, not as separate stat callouts with invented labels.\n"
+            "- When content from a screenshot or embedded image is partially readable, reproduce what you can read exactly and omit what you cannot — never substitute invented text for unreadable content. Unreadable regions can be represented as a lightly styled empty box (e.g. a div with a light grey border and no text) rather than fabricated content.\n"
+            "- Blank space in your output means you dropped something — go back and find what is missing\n"
+            "- The amount of content in your output should feel proportionally similar to the amount of content in the source XML. A content-dense slide should produce a content-dense HTML output\n\n"
+            "COPYEDITING RULES\n"
+            "Apply these copyediting rules silently to all text in the output — do not mention them, just apply them:\n\n"
+            "TITLE CASE (apply to slide titles and section headings):\n"
+            "- Capitalize all words except: articles (a, an, the), coordinating conjunctions (and, but, or, nor, for, so, yet), and prepositions (of, in, on, at, to, by, from, with, through, between, about, against, during, without, within, along, across, after, before, behind, below, beneath, beside, beyond, near, since, toward, under, until, upon, via) unless they are the first or last word of the title\n"
+            "- Always capitalize the first and last word regardless of what it is\n"
+            "- Always capitalize words after a colon or dash\n\n"
+            "SENTENCE CASE (apply to subtitles, body text, bullet points, captions):\n"
+            "- Capitalize only the first word and proper nouns\n"
+            "- Do not capitalize common nouns mid-sentence\n\n"
+            "PROTECTED PROPER NOUNS (always use this exact casing everywhere, never alter):\n"
+            "- FulcrumQ\n"
+            "- Talent to Value\n"
+            "- Jobs to Be Done\n"
+            "- Value Agenda\n"
+            "- Value Hotspots\n\n"
+            "PUNCTUATION CLEANUP:\n"
+            "- Remove any space before a colon, semicolon, period, comma, question mark, or exclamation mark\n"
+            "- Remove double spaces\n"
+            "- Use a straight colon with no surrounding spaces on the left: 'Title: Subtitle' not 'Title : Subtitle'\n\n"
+            "NEVER ALTER:\n"
+            "- Numbers, percentages, dollar amounts\n"
+            "- Acronyms (CEO, CFO, CPG, ROI etc)\n"
+            "- Text inside data tables or data cells\n"
+            "- Brand names other than the protected list above\n"
+            "- Any text you are not fully confident you read correctly from the image\n\n"
+            "Slide position: slide {n} of {total}\n"
+            "Slide type: {slide_type} (cover | content | divider | ending — use \"content\" if unknown)\n\n"
+            "Slide image (base64 PNG, 640px wide):\n"
+            "{base64_image}\n\n"
+            "Cleaned slide XML:\n"
+            "{cleaned_xml}\n\n"
+            "Before the HTML, output a content audit starting with ---AUDIT--- and ending with ---HTML---. The audit should list:\n"
+            "- Every content region you identified in the XML\n"
+            "- For each region: what you found, what you rendered, and if you simplified or omitted anything — explain exactly why (e.g. 'text was too small to read', 'diagram was too complex to reconstruct accurately', 'could not determine exact values')\n"
+            "- Any content you could see but could not reproduce in HTML\n\n"
+            "Then after ---HTML--- output the HTML div as normal. Start your response with ---AUDIT---."
+        )
+
+        def _vit_clean_xml(slide_bytes):
+            """Return a stripped structural XML: shape IDs, positions, text, ph types only."""
+            from lxml import etree as _et
+            _NS_P = "http://schemas.openxmlformats.org/presentationml/2006/main"
+            _NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+            try:
+                _root   = _et.fromstring(slide_bytes)
+                _spTree = _root.find(f".//{{{_NS_P}}}spTree")
+                if _spTree is None:
+                    return "<slide/>"
+                _lines = ["<slide>"]
+                for _sp in _spTree.iter(f"{{{_NS_P}}}sp"):
+                    _attrs = {}
+                    _cNvPr = _sp.find(f".//{{{_NS_P}}}cNvPr")
+                    if _cNvPr is not None:
+                        _attrs["id"] = _cNvPr.get("id", "")
+                    _ph = _sp.find(f".//{{{_NS_P}}}ph")
+                    if _ph is not None:
+                        _attrs["ph"] = _ph.get("type", "body")
+                    _texts = [_t.text for _t in _sp.iter(f"{{{_NS_A}}}t")
+                              if _t.text and _t.text.strip()]
+                    _attr_str = " ".join(f'{k}="{v}"' for k, v in _attrs.items())
+                    _text_str = " ".join(_texts)
+                    if _text_str:
+                        _lines.append(f"  <shape {_attr_str}>{_text_str}</shape>")
+                    else:
+                        _lines.append(f"  <shape {_attr_str}/>")
+                _lines.append("</slide>")
+                return "\n".join(_lines)
+            except Exception:
+                return "<slide/>"
+
+        def _vit_rasterize(pptx_path, tmp_dir, dpi=96):
+            """PPTX → PNG per slide via slide_vision.rasterize_pptx (LibreOffice)."""
+            try:
+                from slide_vision import rasterize_pptx as _sv_rasterize
+            except ImportError as _ie:
+                raise RuntimeError(f"slide_vision not available: {_ie}")
+            return _sv_rasterize(pptx_path, tmp_dir)
+
+        def _vit_call_agent(prompt_text):
+            """Submit prompt to AgentRelay and wait for WebSocket response."""
+            import json as _json
+            import requests as _req
+            try:
+                import websocket as _ws
+            except ImportError:
+                raise RuntimeError(
+                    "websocket-client not installed — run: pip install websocket-client"
+                )
+            _resp = _req.post(
+                f"{_VIT_RELAY_URL}/submit",
+                files={
+                    "agentId": (None, "generic-prompt-agent"),
+                    "Prompt":  (None, prompt_text),
+                },
+                timeout=30,
             )
-
-            _rfs_col1, _rfs_col2 = st.columns(2)
-            with _rfs_col1:
-                _rfs_pptx = st.file_uploader(
-                    "Source PPTX",
-                    type=["pptx"],
-                    key="rfs_pptx",
+            if not _resp.ok:
+                raise Exception(
+                    f"AgentRelay /submit returned {_resp.status_code}: {_resp.text[:1000]}"
                 )
-            with _rfs_col2:
-                _rfs_schema_file = st.file_uploader(
-                    "semantic_schema.json",
-                    type=["json"],
-                    key="rfs_schema",
-                    help="Produced by the Semantic Ingest tab.",
-                )
+            _result = _resp.json()
+            if not _result.get("success"):
+                raise Exception(_result.get("error", "Submission failed"))
+            _wid = _result["webhookId"]
+            _conn = _ws.create_connection(
+                f"wss://anyquest-webhook-relay-production-863f.up.railway.app/ws?id={_wid}",
+                timeout=120,
+            )
+            import time as _time
+            _deadline = _time.time() + 120
+            _tick     = 0
+            _msg      = None
+            while _time.time() < _deadline:
+                _conn.settimeout(30)
+                try:
+                    _msg = _conn.recv()
+                    break
+                except _ws.WebSocketTimeoutException:
+                    _tick += 30
+                    print(f"[AgentRelay] still waiting… {_tick}s elapsed", flush=True)
+            _conn.close()
+            if _msg is None:
+                raise TimeoutError("AgentRelay: no response after 120s")
+            return _json.loads(_msg)["content"]
 
-            if st.button("Render from Schema", type="primary", key="rfs_run"):
-                if _rfs_pptx is None or _rfs_schema_file is None:
-                    st.warning("Upload both the source PPTX and the semantic_schema.json.")
-                else:
-                    import json as _json
+        # ── UI ────────────────────────────────────────────────────────────────
+        st.caption(
+            "Rasterize each slide to PNG, extract structural XML, and render via AI agent. "
+            "Results stream in slide-by-slide."
+        )
 
-                    try:
-                        _rfs_schema = _json.loads(_rfs_schema_file.getvalue().decode("utf-8"))
-                    except Exception as _je:
-                        st.error(f"Could not parse semantic_schema.json: {_je}")
-                        _rfs_schema = None
+        _vit_upload = st.file_uploader(
+            "Upload PPTX", type=["pptx"], key="vit_pptx",
+        )
 
-                    if _rfs_schema is not None:
+        if st.button("Visual Ingest Test", type="primary", key="vit_run",
+                     disabled=_vit_upload is None):
+            with tempfile.TemporaryDirectory() as _vit_tmp:
+                _vit_tmp_p = Path(_vit_tmp)
+                _vit_src   = _vit_tmp_p / _vit_upload.name
+                _vit_src.write_bytes(_vit_upload.getvalue())
+
+                _vit_status = st.empty()
+
+                # ── Rasterize all slides
+                _vit_status.info("⏳ Rasterizing slides via LibreOffice…")
+                try:
+                    _vit_pngs = _vit_rasterize(_vit_src, _vit_tmp_p)
+                except Exception as _vit_re:
+                    st.error(f"Rasterization failed: {_vit_re}")
+                    _vit_pngs = []
+
+                if _vit_pngs:
+                    # ── Extract cleaned XML for each slide
+                    _vit_xmls = []
+                    with zipfile.ZipFile(_vit_src) as _vz:
+                        _vit_snames = sorted(
+                            [_n for _n in _vz.namelist()
+                             if re.match(r"ppt/slides/slide\d+\.xml$", _n)],
+                            key=lambda _p: int(re.search(r"\d+", _p).group()),
+                        )
+                        for _sn in _vit_snames:
+                            _vit_xmls.append(_vit_clean_xml(_vz.read(_sn)))
+
+                    _vit_n    = min(len(_vit_pngs), len(_vit_xmls))
+                    _vit_grid = st.container()
+
+                    def _vit_resize_png(png_bytes, max_width=640):
+                        """Resize PNG to ≤max_width px wide, aspect-ratio preserved."""
                         try:
-                            from services.schema_to_decisions import (
-                                schema_to_decisions        as _s2d,
-                                schema_to_classifier_stubs as _s2c,
-                                validate_schema_vs_pptx    as _validate_counts,
+                            from PIL import Image as _Img
+                            import io as _io
+                            _img = _Img.open(_io.BytesIO(png_bytes))
+                            if _img.width > max_width:
+                                _h = int(_img.height * max_width / _img.width)
+                                _img = _img.resize((max_width, _h), _Img.LANCZOS)
+                            _buf = _io.BytesIO()
+                            _img.save(_buf, format="PNG", optimize=True)
+                            return _buf.getvalue()
+                        except ImportError:
+                            return png_bytes
+
+                    for _vi in range(_vit_n):
+                        _vit_status.info(f"⏳ Processing slide {_vi + 1} of {_vit_n}…")
+
+                        _v_png_bytes = _vit_resize_png(_vit_pngs[_vi].read_bytes())
+                        _v_b64       = base64.b64encode(_v_png_bytes).decode()
+
+                        _v_prompt = (
+                            _VIT_PROMPT_TMPL
+                            .replace("{n}",            str(_vi + 1))
+                            .replace("{total}",        str(_vit_n))
+                            .replace("{slide_type}",   "content")
+                            .replace("{base64_image}", _v_b64)
+                            .replace("{cleaned_xml}",  _vit_xmls[_vi])
+                        )
+                        st.caption(
+                            f"Slide {_vi + 1}: image {len(_v_png_bytes):,}B "
+                            f"b64 {len(_v_b64):,}c  prompt {len(_v_prompt):,}c"
+                        )
+
+                        try:
+                            _v_raw  = _vit_call_agent(_v_prompt)
+                            if "---HTML---" in _v_raw:
+                                _v_audit, _, _v_html = _v_raw.partition("---HTML---")
+                                _v_audit = _v_audit.replace("---AUDIT---", "").strip()
+                                print(
+                                    f"\n[VIT] Slide {_vi + 1} audit:\n{_v_audit}\n",
+                                    flush=True,
+                                )
+                            else:
+                                print(
+                                    f"[VIT] Slide {_vi + 1}: no ---AUDIT--- delimiter found",
+                                    flush=True,
+                                )
+                                _v_html = _v_raw
+                            _v_err  = None
+                        except Exception as _v_ae:
+                            _v_html = None
+                            _v_err  = (
+                                "timeout" if "timeout" in str(_v_ae).lower()
+                                else str(_v_ae)
                             )
-                        except ImportError as _ie:
-                            st.error(f"services.schema_to_decisions not found: {_ie}")
-                            _s2d = None
 
-                        if _s2d is not None:
-                            with tempfile.TemporaryDirectory() as _rfs_tmp:
-                                _rfs_tmp_p = Path(_rfs_tmp)
-                                _rfs_src   = _rfs_tmp_p / _rfs_pptx.name
-                                _rfs_src.write_bytes(_rfs_pptx.getvalue())
-                                _rfs_out   = _rfs_tmp_p / _rfs_pptx.name.replace(".pptx", "_schema_FQ.pptx")
-                                _rfs_rlog  = _rfs_tmp_p / "render_log.json"
-                                _rfs_qa_p  = _rfs_tmp_p / "qa_report.json"
+                        with _vit_grid:
+                            with st.container():
+                                st.markdown(f"---\n#### Slide {_vi + 1} of {_vit_n}")
+                                _vc1, _vc2 = st.columns(2)
+                                with _vc1:
+                                    st.caption("Original")
+                                    _v_png_bytes = _vit_pngs[_vi].read_bytes()
+                                    st.image(_v_png_bytes, use_container_width=True)
+                                with _vc2:
+                                    st.caption("AI Render")
+                                    if _v_html:
+                                        _v_html_clean = _v_html[_v_html.index("<"):] if "<" in _v_html else _v_html
+                                        _v_shared_style = (
+                                            '<style>'
+                                            '*{box-sizing:border-box;}'
+                                            'body{margin:0;padding:0;overflow:hidden;}'
+                                            'h1,h2,h3,h4,[class*="title"],[class*="subtitle"],'
+                                            '[class*="stat"],[class*="callout"]{'
+                                            "font-family:'Segoe UI',sans-serif!important;}"
+                                            'p,li,td,th,span,div,[class*="body"],'
+                                            '[class*="bullet"],[class*="kicker"]{'
+                                            'font-family:Arial,sans-serif!important;}'
+                                            '</style>'
+                                        )
+                                        _v_frame = (
+                                            _v_shared_style
+                                            + '<div style="width:1280px;height:720px;'
+                                            'transform:scale(0.5);transform-origin:top left;'
+                                            'overflow:hidden;">'
+                                            + _v_html_clean
+                                            + '</div>'
+                                        )
+                                        components.html(_v_frame, height=360, scrolling=False)
+                                        _v_dl_doc = (
+                                            '<!DOCTYPE html><html lang="en"><head>'
+                                            '<meta charset="UTF-8">'
+                                            '<meta name="viewport" content="width=1280">'
+                                            '<title>Slide ' + str(_vi + 1) + '</title>'
+                                            + _v_shared_style.replace(
+                                                'body{margin:0;padding:0;overflow:hidden;}',
+                                                'body{margin:0;padding:0;width:1280px;height:720px;overflow:hidden;}'
+                                            )
+                                            + '</head><body>'
+                                            + _v_html_clean
+                                            + '</body></html>'
+                                        )
+                                        st.download_button(
+                                            label=f"⬇ slide_{_vi + 1:02d}.html",
+                                            data=_v_dl_doc.encode("utf-8"),
+                                            file_name=f"slide_{_vi + 1:02d}.html",
+                                            mime="text/html",
+                                            key=f"vit_dl_{_vi}",
+                                        )
+                                    elif _v_err == "timeout":
+                                        st.warning("⏱ Agent timed out (120 s) for this slide.")
+                                    else:
+                                        st.error(f"Agent error: {_v_err}")
 
-                                with zipfile.ZipFile(_rfs_src) as _rfs_z:
-                                    _rfs_slide_count = sum(
-                                        1 for _k in _rfs_z.namelist()
-                                        if re.match(r"ppt/slides/slide\d+\.xml$", _k)
-                                    )
-
-                                try:
-                                    _validate_counts(_rfs_schema, _rfs_slide_count)
-                                except ValueError as _ve:
-                                    st.error(str(_ve))
-                                    _rfs_schema = None
-
-                                if _rfs_schema is not None:
-                                    try:
-                                        _rfs_decisions = _s2d(_rfs_schema)
-                                        _rfs_stubs     = _s2c(_rfs_schema)
-                                    except ValueError as _ve:
-                                        st.error(f"Schema translation error: {_ve}")
-                                        _rfs_decisions = None
-
-                                    if _rfs_decisions is not None:
-                                        with st.spinner("Rendering…"):
-                                            try:
-                                                _rfs_ren_log = _pl_render(
-                                                    _rfs_src, _rfs_decisions,
-                                                    _PIPELINE_MASTER, _rfs_out,
-                                                    output_log=_rfs_rlog,
-                                                )
-                                                _rfs_render_ok = True
-                                            except Exception as _re:
-                                                st.error(f"Render failed: {_re}")
-                                                _rfs_render_ok = False
-
-                                        if _rfs_render_ok:
-                                            with st.spinner("Validating…"):
-                                                try:
-                                                    _rfs_qa_report = _pl_qa(
-                                                        _rfs_out, _rfs_ren_log,
-                                                        _rfs_stubs,
-                                                        output_path=_rfs_qa_p,
-                                                    )
-                                                except Exception as _qe:
-                                                    st.warning(f"QA validation failed: {_qe}")
-                                                    _rfs_qa_report = None
-
-                                            st.success(f"Rendered {len(_rfs_decisions)} slides.")
-
-                                            if _rfs_out.exists():
-                                                st.download_button(
-                                                    label=f"Download {_rfs_out.name}",
-                                                    data=_rfs_out.read_bytes(),
-                                                    file_name=_rfs_out.name,
-                                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                                    key="rfs_dl",
-                                                )
-
-                                            if _rfs_qa_report:
-                                                _rqs = _rfs_qa_report.get("summary", {})
-                                                st.markdown(
-                                                    f"**QA:** {_rqs.get('pass', 0)} pass · "
-                                                    f"{_rqs.get('review', 0)} review · "
-                                                    f"{_rqs.get('fail', 0)} fail "
-                                                    f"({_rqs.get('total', 0)} slides)"
-                                                )
-                                                with st.expander("QA report", expanded=False):
-                                                    st.json(_rfs_qa_report)
-
-                                            with st.expander("Render log", expanded=False):
-                                                st.json(_rfs_ren_log)
+                    _vit_status.success(f"✓ Done — {_vit_n} slides processed.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2178,3 +2441,155 @@ with tab_semantic:
             "Semantic Ingest tab failed to load. "
             "Ensure `services/` and `tabs/` are present in the project directory."
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — GUIDED CONVERT
+# Upload → rasterize → user designates cover/divider/ending per slide →
+# convert() with forced_layouts → download output PPTX
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_guided:
+    st.subheader("Guided Convert")
+    st.caption(
+        "Upload a deck, review slide thumbnails, designate cover / divider / ending slides, "
+        "then convert. All other slides default to Title Only or Sub layout."
+    )
+
+    _gc_upload = st.file_uploader(
+        "Upload source PPTX", type=["pptx"], key="gc_upload"
+    )
+
+    if _gc_upload is not None:
+        import hashlib as _hashlib
+
+        _gc_hash = _hashlib.md5(_gc_upload.getvalue()).hexdigest()
+
+        # ── Rasterize once per file (cached in session state) ─────────────────
+        if st.session_state.get("gc_hash") != _gc_hash:
+            with st.spinner("Rasterizing slides…"):
+                try:
+                    import tempfile as _gc_tf
+                    from slide_vision import rasterize_pptx as _gc_rasterize
+
+                    _gc_tmp_dir = _gc_tf.mkdtemp(prefix="gc_")
+                    _gc_src = Path(_gc_tmp_dir) / _gc_upload.name
+                    _gc_src.write_bytes(_gc_upload.getvalue())
+                    _gc_pngs = _gc_rasterize(_gc_src, Path(_gc_tmp_dir))
+
+                    st.session_state["gc_hash"]    = _gc_hash
+                    st.session_state["gc_pngs"]    = [p.read_bytes() for p in _gc_pngs]
+                    st.session_state["gc_src_bytes"] = _gc_upload.getvalue()
+                    st.session_state["gc_src_name"]  = _gc_upload.name
+                    st.session_state["gc_n"]       = len(_gc_pngs)
+                except Exception as _gc_re:
+                    st.error(f"Could not generate slide previews: {_gc_re}")
+                    st.stop()
+
+        _gc_n        = st.session_state.get("gc_n", 0)
+        _gc_png_list = st.session_state.get("gc_pngs", [])
+
+        if not _gc_png_list:
+            st.warning("No slide previews available.")
+        else:
+            st.markdown(f"**{_gc_n} slides** — select a type for each:")
+
+            # ── Thumbnail grid (3 columns) ────────────────────────────────────
+            _GC_COLS = 3
+            _gc_designations = {}
+
+            for _gc_row_start in range(0, _gc_n, _GC_COLS):
+                _gc_cols = st.columns(_GC_COLS)
+                for _gc_col_idx in range(_GC_COLS):
+                    _gc_slide_idx = _gc_row_start + _gc_col_idx + 1
+                    if _gc_slide_idx > _gc_n:
+                        break
+                    with _gc_cols[_gc_col_idx]:
+                        st.image(
+                            _gc_png_list[_gc_slide_idx - 1],
+                            caption=f"Slide {_gc_slide_idx}",
+                            use_container_width=True,
+                        )
+                        # Default: slide 1 → cover, last slide → ending, rest → content
+                        if _gc_slide_idx == 1:
+                            _gc_default = "cover"
+                        elif _gc_slide_idx == _gc_n:
+                            _gc_default = "ending"
+                        else:
+                            _gc_default = "content"
+
+                        _gc_designations[_gc_slide_idx] = st.selectbox(
+                            f"slide_{_gc_slide_idx}",
+                            ["content", "cover", "divider", "ending"],
+                            index=["content", "cover", "divider", "ending"].index(_gc_default),
+                            key=f"gc_des_{_gc_slide_idx}",
+                            label_visibility="collapsed",
+                        )
+
+            # ── Validation ────────────────────────────────────────────────────
+            _gc_covers  = [i for i, d in _gc_designations.items() if d == "cover"]
+            _gc_endings = [i for i, d in _gc_designations.items() if d == "ending"]
+            _gc_valid   = True
+
+            if len(_gc_covers) > 1:
+                st.warning(f"Only 1 cover allowed — slides {_gc_covers} are all marked as cover.")
+                _gc_valid = False
+            if len(_gc_endings) > 1:
+                st.warning(f"Only 1 ending allowed — slides {_gc_endings} are all marked as ending.")
+                _gc_valid = False
+
+            # ── Convert button ────────────────────────────────────────────────
+            if st.button("Convert", type="primary", key="gc_convert", disabled=not _gc_valid):
+                # Build forced_layouts — only non-content slides get forced
+                _gc_layout_map = {
+                    "cover":   "Cover_Light",
+                    "divider": "Divider_Dark",
+                    "ending":  "Ending_PivotPurple",
+                }
+                _gc_forced = {
+                    idx: _gc_layout_map[des]
+                    for idx, des in _gc_designations.items()
+                    if des in _gc_layout_map
+                }
+
+                with st.spinner("Converting…"):
+                    try:
+                        import tempfile as _gc_tf2
+                        import convert_deck as _gc_cd
+
+                        _gc_tmp2   = _gc_tf2.mkdtemp(prefix="gc_out_")
+                        _gc_src2   = Path(_gc_tmp2) / st.session_state["gc_src_name"]
+                        _gc_src2.write_bytes(st.session_state["gc_src_bytes"])
+
+                        # Reload module to pick up any live edits
+                        import importlib as _gc_il
+                        _gc_il.reload(_gc_cd)
+
+                        _gc_out = _gc_cd.convert(_gc_src2, forced_layouts=_gc_forced)
+                        _gc_out_bytes = _gc_out.read_bytes()
+
+                        st.success(f"Done — {len(_gc_out_bytes):,} bytes")
+                        st.download_button(
+                            label="⬇ Download converted PPTX",
+                            data=_gc_out_bytes,
+                            file_name=_gc_out.name,
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            key="gc_download",
+                        )
+
+                        # Layout summary table
+                        st.markdown("**Layout selection summary:**")
+                        _gc_summary = []
+                        for _si, _des in _gc_designations.items():
+                            _forced_name = _gc_forced.get(_si, "—")
+                            _gc_summary.append(
+                                f"| {_si} | {_des} | {_forced_name} |"
+                            )
+                        st.markdown(
+                            "| Slide | Designation | Forced Layout |\n"
+                            "|---|---|---|\n" + "\n".join(_gc_summary)
+                        )
+
+                    except Exception as _gc_e:
+                        st.error(f"Conversion failed: {_gc_e}")
+                        import traceback as _gc_tb
+                        st.code(_gc_tb.format_exc())
