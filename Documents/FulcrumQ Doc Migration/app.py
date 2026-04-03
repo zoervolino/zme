@@ -16,13 +16,6 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-# ── Auto-install optional dependencies ────────────────────────────────────────
-try:
-    import websocket  # noqa: F401
-except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "websocket-client"],
-                   check=True, capture_output=True)
-
 import streamlit as st
 import streamlit.components.v1 as components
 
