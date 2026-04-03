@@ -903,88 +903,58 @@ _AGENT_RELAY_URL = "https://anyquest-webhook-relay-production-863f.up.railway.ap
 
 def _agent_detect_title(slide_image_path):
     """
-    Sends a rasterized slide PNG to the vision-capable AnyQuest agent.
+    Sends a rasterized slide PNG to the vision-capable AnyQuest agent via file upload.
+    Uses the Job API (Path 2): multipart POST with real file attachment, then polling.
     Returns a dict with title, subtitle, slide_type, confidence, reason,
     and color_semantics — or None on any failure.
     """
     try:
         import requests as _req
         import json as _json
-        import websocket as _ws
+        import time as _time
         from PIL import Image as _Img
         import io as _io
     except ImportError:
         return None
 
     try:
-        import base64 as _b64
+        # Resize to 480px wide and compress to JPEG to reduce payload
         img = _Img.open(slide_image_path)
         if img.width > 480:
             _h = int(img.height * 480 / img.width)
             img = img.resize((480, _h), _Img.LANCZOS)
         buf = _io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=60)
-        _img_b64 = _b64.standard_b64encode(buf.getvalue()).decode()
+        buf.seek(0)
 
         prompt = (
-            f"[image/jpeg;base64]\n{_img_b64}\n[/image]\n\n"
-            "You are a presentation slide designer analyzing a slide image.\n\n"
-            "Look at the slide carefully and return ONLY the following JSON — no preamble, "
-            "no explanation, no markdown:\n\n"
-            "{\n"
-            '  "title": "exact title text visible on slide",\n'
-            '  "subtitle": "exact subtitle text or null if none",\n'
-            '  "slide_type": "cover|divider|content|ending",\n'
-            '  fidence": 0.0-1.0,\n'
-            '  "reason": "one sentence explaining title identification",\n'
-            '  "color_semantics": [\n'
-            '    {\n'
-            '      "description": "brief description of where this element is on the slide",\n'
-            '      "semantic": "rag_indicator|rating_scale|legend|gradient_slider|status_dot|brand_decorative|icon|diagram|chart",\n'
-            '      "action": "preserve_original|remap_to_purple|interpolate_gradient"\n'
-            '    }\n'
-            '  ]\n'
-            "}\n\n"
-            "TITLE rules:\n"
-            "- The title is the most prominent heading — largest or boldest text, usually near the top\n"
-            "- Do not return bullet points, body text, footer text, or slide numbers as the title\n"
-            "- If no clear title exists, return null\n\n"
-            "SUBTITLE rules:\n"
-            "- The subtitle is smaller supporting text directly below or near the title\n"
-            "- It provides context, a date, a client name, or arief descriptor\n"
-            "- NOT bullets, NOT body content, NOT footer, NOT copyright\n"
-            "- If no subtitle exists, return null\n\n"
-            "SLIDE TYPE rules:\n"
-            "- cover: opening/title slide, usually slide 1, large title, minimal body content\n"
-            "- divider: section break, bold background color, just a section title, no body bullets\n"
-            "- content: body slide with bullets, charts, tables, diagrams, or data\n"
-            "- ending: closing slide — thank you, questions, contact info\n\n"
-            "COLOR SEMANTICS rules — identify every group of colored elements:\n"
-            "- rag_indicator: explicit red/amber/green traffic light system (3 shapes spanning R/A/G hues)\n"
-            "- rating_scale: colored dots or shapes in a column/row next to list items, indicating status per item (e.g. green dot = good, red dot = at risk)\n"
-            "- legend: color swatches with text labels explaining what each color means\n"
-            "- gradient_sl: a horizontal or vertical bar that transitions through multiple colors (e.g. dark → amber → green spectrum)\n"
-            "- status_dot: a single isolated colored dot or circle indicating the status of one specific item\n"
-            "- brand_decorative: a colored shape, band, or rectangle that is purely visual/structural with no semantic meaning\n"
-            "- icon: an icon, illustration, or small graphic — color is part of the artwork\n"
-            "- diagram: a flowchart, org chart, process diagram, or structured graphic — preserve all colors\n"
-            "- chart: a data chart or graph — preserve series colors\n\n"
-            "Action rules for color_semantics:\n"
-            "- rag_indicator, rating_scale, legend, gradient_slider, status_dot → preserve_original (these colors convey meaning, do not remap)\n"
-            "- brand_decorative → remap_to_purple (these are decorative and should be rebranded)\n"
-            "- icon, diagram, chart → preserve_original (these are contenot alter)\n"
-            "- gradient_slider → interpolate_gradient (preserve endpoints, mathematically interpolate middle stops)\n\n"
-            "If no semantic color elements are visible on this slide, return an empty array [] for color_semantics.\n\n"
-            "IMPORTANT: Return only the JSON object. Do not copy field names as values. "
-            "Do not return placeholder text. Start your response with { and end with }."
+            "RESPOND WITH JSON ONLY. No markdown, no prose, no explanation. "
+            "Your entire response must be a single JSON object starting with { and ending with }.\n\n"
+            "Analyze the attached slide image and return this exact structure:\n\n"
+            '{"title":"<title text or null>","subtitle":"<subtitle text or null>",'
+            '"slide_type":"cover|divider|content|ending","confidence":0.0,'
+            '"reason":"<one sentence>","color_semantics":[]}\n\n'
+            "TITLE: the largest/boldest heading text near the top. Not bullets, not body, not footer.\n"
+            "SUBTITLE: smaller supporting text directly below the title. Not bullets, not body.\n"
+            "SLIDE TYPE: cover=opening slide | divider=section break with bold bg | "
+            "content=body with bullets/data | ending=thank you/questions/contact\n"
+            "COLOR SEMANTICS: for each colored element group, add an object with "
+            "{description, semantic, action}. "
+            "semantic values: rag_indicator|rating_scale|legend|gradient_slider|status_dot|brand_decorative|icon|diagram|chart. "
+            "action: preserve_original (rag/rating/legend/status/icon/diagram/chart) | "
+            "remap_to_purple (brand_decorative) | interpolate_gradient (gradient_slider). "
+            "If no semantic colors, use [].\n\n"
+            "Return JSON only. Start with {. End with }."
         )
 
+        # Submit with PIL-resized JPEG (smaller payload for faster processing)
         resp = _req.post(
             f"{_AGENT_RELAY_URL}/submit",
-            files={
-                "agentId": (None, "generic-prompt-agent"),
-                "Prompt":  (None, prompt),
-            },
+            files=[
+                ('agentId', (None, 'generic-prompt-agent')),
+                ('Prompt',  (None, prompt)),
+                ('files',   ('slide.jpg', buf, 'image/jpeg')),
+            ],
             timeout=30,
         )
 
@@ -993,21 +963,54 @@ def _agent_detect_title(slide_image_path):
             return None
 
         result = resp.json()
-        if not result.get('success'):
+        if not result.get("success"):
+            print(f"         [agent-title] submit failed: {result.get('error','')}", flush=True)
             return None
 
-        conn = _ws.create_connection(
-            f"wss://anyquest-webhook-relay-production-863f.up.railway.app/ws?id={result['webhookId']}",
-            timeout=120,
-        )
-        msg  = conn.recv()
-        conn.close()
+        request_id = result["requestId"]
 
-        content = _json.loads(msg)['content']
+        # Poll GET /result/{requestId} every 3s up to 120s
+        deadline   = _time.time() + 120
+        content    = None
+        last_status = None
+        while _time.time() < deadline:
+            poll = _req.get(f"{_AGENT_RELAY_URL}/result/{request_id}", timeout=10)
+            data = poll.json()
+            status = data.get("status", "unknown")
+            if status != last_status:
+                elapsed = int(120 - (deadline - _time.time()))
+                print(f"         [agent-title] poll status={status!r} t={elapsed}s  keys={list(data.keys())}", flush=True)
+                last_status = status
+            if status == "completed":
+                content = data.get("content") or data.get("result") or data.get("output") or ""
+                print(f"         [agent-title] completed, content[:80]={content[:80]!r}", flush=True)
+                break
+            if status == "not_found":
+                print(f"         [agent-title] result not found: {request_id}", flush=True)
+                return None
+            if status == "failed":
+                print(f"         [agent-title] job failed: {data}", flush=True)
+                return None
+            _time.sleep(3)
+
+        if content is None:
+            print(f"         [agent-title] polling timeout after 120s, last status={last_status!r}", flush=True)
+            return None
 
         # Extract first complete JSON object by brace matching
         start = content.find('{')
         if start == -1:
+            # Prose fallback: agent returned markdown instead of JSON — try to pull title
+            import re as _re
+            _heading = _re.search(r"#+ (.+)", content)
+            _titled  = _re.search(r'titled[:\s"*]+([^\n"*]+)', content, _re.IGNORECASE)
+            _title   = (_heading or _titled)
+            if _title:
+                _t = _title.group(1).strip().strip("*").strip()
+                if len(_t) >= 2:
+                    print(f"         [agent-title] prose fallback title: {_t!r}", flush=True)
+                    return {"title": _t, "subtitle": None, "slide_type": "content",
+                            "confidence": 0.5, "reason": "prose fallback", "color_semantics": []}
             print(f"         [agent-title] no JSON in response: {content[:100]}", flush=True)
             return None
         depth, end = 0, -1
@@ -1026,10 +1029,10 @@ def _agent_detect_title(slide_image_path):
         parsed = _json.loads(content[start:end])
 
         # Guard against echoed template / bad responses
-        title = parsed.get('title', '') or ''
+        title = parsed.get("title", "") or ""
         bad_values = {
-            'null', 'none', 'exact title text visible on slide',
-            'exact title text', 'the title text',
+            "null", "none", "exact title text visible on slide",
+            "exact title text", "the title text",
         }
         if title.lower().strip() in bad_values or len(title.strip()) < 2:
             print(f"         [agent-title] bad response: {content[:100]}", flush=True)
@@ -2094,6 +2097,125 @@ def snap_subtitle_to_layout(slide_root, layout_bytes):
             snapped += 1
 
     return snapped
+
+
+def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_text=None):
+    """
+    Write agent-detected title and subtitle directly into the slide's native
+    v7 layout placeholders.
+
+    Strategy:
+      1. Remove all existing title/ctrTitle/subTitle placeholder shapes from the slide.
+      2. Remove any txBox whose full text matches title_text or subtitle_text exactly.
+      3. Create a minimal title <p:sp> with ph type="title" (layout provides geometry).
+      4. If subtitle_text and the v7 layout exposes a subtitle slot: create subtitle <p:sp>.
+      5. Insert both at the front of spTree.
+
+    style_slide() applies font, color, and sentence-casing in a later pass.
+    Returns (injected_title: bool, injected_subtitle: bool).
+    """
+    spTree = slide_root.find(f".//{{{NS_P}}}spTree")
+    if spTree is None:
+        return False, False
+
+    # -- What subtitle slot does this layout expose? ---------------------------
+    layout_root   = etree.fromstring(layout_bytes)
+    layout_sub_ph = None   # (ph_type, ph_idx) of layout subtitle slot
+    for lsp in layout_root.iter(f"{{{NS_P}}}sp"):
+        ph = lsp.find(f".//{{{NS_P}}}ph")
+        if ph is None:
+            continue
+        pt = ph.get("type", "body")
+        pi = ph.get("idx",  "0")
+        if pt == "subTitle" or (pt == "body" and pi in ("1", "12")):
+            layout_sub_ph = (pt, pi)
+            break
+
+    # -- Remove old title/subtitle shapes from the slide ----------------------
+    title_norm = (title_text    or "").strip().lower()
+    sub_norm   = (subtitle_text or "").strip().lower()
+
+    to_remove = []
+    for sp in list(spTree):
+        if sp.tag != f"{{{NS_P}}}sp":
+            continue
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in ("title", "ctrTitle", "subTitle"):
+            to_remove.append(sp)
+            continue
+        # Also remove txBoxes whose full text exactly matches agent title or subtitle
+        cNvSpPr = sp.find(f".//{{{NS_P}}}cNvSpPr")
+        if cNvSpPr is not None and cNvSpPr.get("txBox") == "1":
+            txBody = sp.find(f"{{{NS_P}}}txBody")
+            if txBody is not None:
+                shape_text = "".join(
+                    t.text or "" for t in txBody.iter(f"{{{NS_A}}}t")
+                ).strip().lower()
+                if shape_text and shape_text in (title_norm, sub_norm):
+                    to_remove.append(sp)
+
+    for sp in to_remove:
+        spTree.remove(sp)
+
+    # -- Helper: build a minimal placeholder <p:sp> ----------------------------
+    def _make_ph_sp(ph_type, ph_idx, text, sp_id, sp_name):
+        sp_el      = etree.Element(f"{{{NS_P}}}sp")
+        nvSpPr     = etree.SubElement(sp_el,   f"{{{NS_P}}}nvSpPr")
+        cNvPr_el   = etree.SubElement(nvSpPr,  f"{{{NS_P}}}cNvPr")
+        cNvPr_el.set("id",   str(sp_id))
+        cNvPr_el.set("name", sp_name)
+        cNvSpPr_el = etree.SubElement(nvSpPr,  f"{{{NS_P}}}cNvSpPr")
+        spLocks    = etree.SubElement(cNvSpPr_el, f"{{{NS_A}}}spLocks")
+        spLocks.set("noGrp", "1")
+        nvPr       = etree.SubElement(nvSpPr,  f"{{{NS_P}}}nvPr")
+        ph_el      = etree.SubElement(nvPr,    f"{{{NS_P}}}ph")
+        ph_el.set("type", ph_type)
+        if ph_idx and ph_idx not in ("0", None):
+            ph_el.set("idx", ph_idx)
+        etree.SubElement(sp_el, f"{{{NS_P}}}spPr")   # empty → inherit geometry from layout
+        txBody   = etree.SubElement(sp_el,   f"{{{NS_P}}}txBody")
+        etree.SubElement(txBody, f"{{{NS_A}}}bodyPr")
+        etree.SubElement(txBody, f"{{{NS_A}}}lstStyle")
+        p_el     = etree.SubElement(txBody,  f"{{{NS_A}}}p")
+        r_el     = etree.SubElement(p_el,    f"{{{NS_A}}}r")
+        rPr      = etree.SubElement(r_el,    f"{{{NS_A}}}rPr")
+        rPr.set("lang",  "en-US")
+        rPr.set("dirty", "0")
+        t_el     = etree.SubElement(r_el,    f"{{{NS_A}}}t")
+        t_el.text = text
+        return sp_el
+
+    # -- Safe ID base for new shapes ------------------------------------------
+    max_id = max(
+        (int(el.get("id", 0)) for el in slide_root.iter(f"{{{NS_P}}}cNvPr")
+         if el.get("id", "0").isdigit()),
+        default=0,
+    )
+
+    # -- Inject title ---------------------------------------------------------
+    injected_title    = False
+    injected_subtitle = False
+
+    if title_text:
+        title_sp = _make_ph_sp("title", None, title_text, max_id + 1, "Title 1")
+        spTree.insert(0, title_sp)
+        max_id += 1
+        injected_title = True
+
+    # -- Inject subtitle (only if layout has a slot for it) -------------------
+    if subtitle_text and layout_sub_ph:
+        sub_type, sub_idx = layout_sub_ph
+        sub_sp = _make_ph_sp(
+            "subTitle",
+            sub_idx if sub_idx not in ("0", None) else None,
+            subtitle_text,
+            max_id + 1,
+            "Subtitle 2",
+        )
+        spTree.insert(1 if injected_title else 0, sub_sp)
+        injected_subtitle = True
+
+    return injected_title, injected_subtitle
 
 
 NS_R_IMG = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
@@ -4413,43 +4535,61 @@ def convert(source_path: Path, forced_layouts: dict = None):
             remap_slide_layout(file_map, spath, v7_layout)
             print(f"  slide{i:2d}: '{old_name}' [{match}] → layout{v7_num} [{v7_layout_name}]")
 
-        # Lift text from decorative shapes into placeholders (Cover/Divider slides)
-        n_lifted = lift_text_into_placeholders(slide_root, v7_layout_name, title_hint=_agent_hint)
-        if n_lifted:
-            print(f"         lifted  : text from decorative shape → title placeholder")
+        # ── Title / subtitle injection ──────────────────────────────────────────
+        _agent_title    = _det.get("title")    if _det else None
+        _agent_subtitle = _det.get("subtitle") if _det else None
 
-        promoted = promote_slide_title(slide_root, title_hint=_agent_hint)
-        if promoted:
-            print(f"         promoted: body ph → title")
+        if _agent_title:
+            # Upgrade to _Sub layout variant if agent detected a subtitle
+            if _agent_subtitle and not _forced_name:
+                sub_layout_name = _SUB_LAYOUT_MAP.get(v7_layout_name)
+                if sub_layout_name and sub_layout_name in x_name_map:
+                    v7_layout      = x_name_map[sub_layout_name]
+                    v7_layout_name = sub_layout_name
+                    remap_slide_layout(file_map, spath, v7_layout)
+                    print(f"         subtitle : '{_agent_subtitle[:40]}' | layout → {sub_layout_name}")
 
-        # Subtitle detection: two sources —
-        # (a) Shift+Enter in title → split_title_subtitle extracts it
-        # (b) Existing subTitle placeholder already present in source slide
-        # Either way: upgrade layout to the _Sub variant.
-        subtitle_parts = split_title_subtitle(slide_root)
-        has_existing_subtitle_ph = any(
-            sp.find(f".//{{{NS_P}}}ph") is not None
-            and (
-                sp.find(f".//{{{NS_P}}}ph").get("type", "") == "subTitle"
-                or (sp.find(f".//{{{NS_P}}}ph").get("type", "") == "body"
-                    and sp.find(f".//{{{NS_P}}}ph").get("idx", "") == "12")
+            inj_t, inj_s = inject_agent_title_subtitle(
+                slide_root, file_map[v7_layout], _agent_title, _agent_subtitle
             )
-            for sp in slide_root.iter(f"{{{NS_P}}}sp")
-        )
-        if (subtitle_parts or has_existing_subtitle_ph) and not _forced_name:
-            sub_layout_name = _SUB_LAYOUT_MAP.get(v7_layout_name)
-            if sub_layout_name and sub_layout_name in x_name_map:
-                v7_layout      = x_name_map[sub_layout_name]
-                v7_layout_name = sub_layout_name
-                remap_slide_layout(file_map, spath, v7_layout)
-                reason = f"'{subtitle_parts[0]}' (split)" if subtitle_parts else "existing subTitle ph"
-                print(f"         subtitle : {reason} | layout → {sub_layout_name}")
-            elif subtitle_parts:
-                print(f"         subtitle : '{subtitle_parts[0]}' → subTitle ph (no _Sub layout available)")
+            if inj_t:
+                print(f"         injected : title='{_agent_title[:55]}'")
+            if inj_s:
+                print(f"                    subtitle='{_agent_subtitle[:50]}'")
+        else:
+            # Fallback: agent unavailable — use XML heuristics
+            n_lifted = lift_text_into_placeholders(slide_root, v7_layout_name, title_hint=_agent_hint)
+            if n_lifted:
+                print(f"         lifted  : text from decorative shape → title placeholder")
 
-        n_snapped = snap_subtitle_to_layout(slide_root, file_map[v7_layout])
-        if n_snapped:
-            print(f"         snapped : {n_snapped} subtitle-vibe ph(s) → layout position")
+            promoted = promote_slide_title(slide_root, title_hint=_agent_hint)
+            if promoted:
+                print(f"         promoted: body ph → title")
+
+            subtitle_parts = split_title_subtitle(slide_root)
+            has_existing_subtitle_ph = any(
+                sp.find(f".//{{{NS_P}}}ph") is not None
+                and (
+                    sp.find(f".//{{{NS_P}}}ph").get("type", "") == "subTitle"
+                    or (sp.find(f".//{{{NS_P}}}ph").get("type", "") == "body"
+                        and sp.find(f".//{{{NS_P}}}ph").get("idx", "") == "12")
+                )
+                for sp in slide_root.iter(f"{{{NS_P}}}sp")
+            )
+            if (subtitle_parts or has_existing_subtitle_ph) and not _forced_name:
+                sub_layout_name = _SUB_LAYOUT_MAP.get(v7_layout_name)
+                if sub_layout_name and sub_layout_name in x_name_map:
+                    v7_layout      = x_name_map[sub_layout_name]
+                    v7_layout_name = sub_layout_name
+                    remap_slide_layout(file_map, spath, v7_layout)
+                    reason = f"'{subtitle_parts[0]}' (split)" if subtitle_parts else "existing subTitle ph"
+                    print(f"         subtitle : {reason} | layout → {sub_layout_name}")
+                elif subtitle_parts:
+                    print(f"         subtitle : '{subtitle_parts[0]}' → subTitle ph (no _Sub layout available)")
+
+            n_snapped = snap_subtitle_to_layout(slide_root, file_map[v7_layout])
+            if n_snapped:
+                print(f"         snapped : {n_snapped} subtitle-vibe ph(s) → layout position")
 
         bullet_promoted = promote_bullet_txbox(slide_root, file_map, spath)
         if bullet_promoted and not _forced_name:
@@ -4469,13 +4609,14 @@ def convert(source_path: Path, forced_layouts: dict = None):
             print(f"         removed: {removed}")
             total_vestiges += len(removed)
 
-        # Agent color semantics pre-pass
-        _color_map = agent_color_prepass(str(_slide_pngs[i - 1]) if _slide_pngs and i - 1 < len(_slide_pngs) else None, slide_root)
-        if _color_map.get("has_semantic_color_system"):
-            rag_preserve = rag_preserve | _color_map.get("preserve_original_shapes", set())
-            print(f"         color-agent: {len(_color_map.get('preserve_original_shapes', set()))} shape(s) preserved, "
-                  f"{len(_color_map.get('interpolate_gradient_shapes', set()))} gradient(s) flagged "
-                  f"(confidence: {_color_map.get('confidence', 0):.0%})")
+        # Agent color semantics pre-pass — commented out: color_semantics now comes from
+        # _agent_detect_title() response; will wire into rag_preserve once vision returns JSON.
+        # _color_map = agent_color_prepass(str(_slide_pngs[i - 1]) if _slide_pngs and i - 1 < len(_slide_pngs) else None, slide_root)
+        # if _color_map.get("has_semantic_color_system"):
+        #     rag_preserve = rag_preserve | _color_map.get("preserve_original_shapes", set())
+        #     print(f"         color-agent: {len(_color_map.get('preserve_original_shapes', set()))} shape(s) preserved, "
+        #           f"{len(_color_map.get('interpolate_gradient_shapes', set()))} gradient(s) flagged "
+        #           f"(confidence: {_color_map.get('confidence', 0):.0%})")
 
         convert_scheme_fills(slide_root)
 

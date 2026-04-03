@@ -1469,7 +1469,7 @@ with tab_convert:
 
         _VIT_PROMPT_TMPL = (
             "You are a presentation slide designer. You will receive a rasterized image "
-            "of a slide (base64 PNG) and its cleaned XML structure.\n\n"
+            "of a slide as a file attachment and its cleaned XML structure.\n\n"
             "Your job is to re-render this slide as clean, brand-compliant HTML that "
             "faithfully represents the slide's content and visual intent.\n\n"
             "═══════════════════════════════════════\n"
@@ -1590,8 +1590,6 @@ with tab_convert:
             "- Any text you are not fully confident you read correctly from the image\n\n"
             "Slide position: slide {n} of {total}\n"
             "Slide type: {slide_type} (cover | content | divider | ending — use \"content\" if unknown)\n\n"
-            "Slide image (base64 PNG, 640px wide):\n"
-            "{base64_image}\n\n"
             "Cleaned slide XML:\n"
             "{cleaned_xml}\n\n"
             "Before the HTML, output a content audit starting with ---AUDIT--- and ending with ---HTML---. The audit should list:\n"
@@ -1641,8 +1639,8 @@ with tab_convert:
                 raise RuntimeError(f"slide_vision not available: {_ie}")
             return _sv_rasterize(pptx_path, tmp_dir)
 
-        def _vit_call_agent(prompt_text):
-            """Submit prompt to AgentRelay and wait for WebSocket response."""
+        def _vit_call_agent(prompt_text, image_bytes, image_name="slide.png"):
+            """Submit prompt plus slide image to AgentRelay and wait for WebSocket response."""
             import json as _json
             import requests as _req
             try:
@@ -1655,7 +1653,8 @@ with tab_convert:
                 f"{_VIT_RELAY_URL}/submit",
                 files={
                     "agentId": (None, "generic-prompt-agent"),
-                    "Prompt":  (None, prompt_text),
+                    "Prompt": (None, prompt_text),
+                    "files": (image_name, image_bytes, "image/png"),
                 },
                 timeout=30,
             )
@@ -1749,23 +1748,25 @@ with tab_convert:
                         _vit_status.info(f"⏳ Processing slide {_vi + 1} of {_vit_n}…")
 
                         _v_png_bytes = _vit_resize_png(_vit_pngs[_vi].read_bytes())
-                        _v_b64       = base64.b64encode(_v_png_bytes).decode()
 
                         _v_prompt = (
                             _VIT_PROMPT_TMPL
                             .replace("{n}",            str(_vi + 1))
                             .replace("{total}",        str(_vit_n))
                             .replace("{slide_type}",   "content")
-                            .replace("{base64_image}", _v_b64)
                             .replace("{cleaned_xml}",  _vit_xmls[_vi])
                         )
                         st.caption(
                             f"Slide {_vi + 1}: image {len(_v_png_bytes):,}B "
-                            f"b64 {len(_v_b64):,}c  prompt {len(_v_prompt):,}c"
+                            f"prompt {len(_v_prompt):,}c"
                         )
 
                         try:
-                            _v_raw  = _vit_call_agent(_v_prompt)
+                            _v_raw  = _vit_call_agent(
+                                _v_prompt,
+                                _v_png_bytes,
+                                image_name=f"slide_{_vi + 1}.png",
+                            )
                             if "---HTML---" in _v_raw:
                                 _v_audit, _, _v_html = _v_raw.partition("---HTML---")
                                 _v_audit = _v_audit.replace("---AUDIT---", "").strip()
