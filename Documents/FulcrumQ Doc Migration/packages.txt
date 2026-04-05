@@ -1,0 +1,2 @@
+libreoffice-core
+libreoffice-impress

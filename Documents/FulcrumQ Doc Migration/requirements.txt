@@ -1,0 +1,10 @@
+streamlit
+requests
+websocket-client
+lxml
+Pillow
+numpy
+python-pptx
+PyMuPDF
+opencv-python-headless
+anthropic

@@ -42,6 +42,7 @@ except ImportError:
 SOFFICE_CANDIDATES = [
     "/opt/homebrew/bin/soffice",
     "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+    "/usr/bin/soffice",
     "soffice",
     "libreoffice",
     "/usr/bin/libreoffice",

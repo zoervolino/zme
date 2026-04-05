@@ -18,6 +18,10 @@ Look at this presentation slide image carefully. Focus only on colored elements 
 — specifically any red, amber/orange, green, pink/magenta, or teal colored shapes, \
 dots, circles, or gradient elements.
 
+Red is semantic-only in this brand system. Treat red as meaningful only when it clearly \
+signals negative / at-risk / low-score status. Never use decorative or generic emphasis \
+as a reason to preserve or introduce red.
+
 For each colored element or group of related colored elements, determine its semantic purpose:
 
 - "rating_scale": colored dots or shapes in a column/row next to items in a list, \
@@ -29,14 +33,13 @@ in a row or group
 (dark → amber → green, or similar spectrum)
 - "brand_decorative": a colored shape that is purely visual/structural with no semantic \
 meaning (background rectangle, divider line, accent shape)
-- "chart_series": colors used to distinguish data series in a chart or graph
 
 Return ONLY this JSON with no preamble:
 {
   "semantic_colors": [
     {
       "description": "brief description of where this element is on the slide",
-      "semantic": "rating_scale|rag_indicator|legend|gradient_slider|brand_decorative|chart_series",
+      "semantic": "rating_scale|rag_indicator|legend|gradient_slider|brand_decorative",
       "action": "preserve_original|remap_to_rag|remap_to_purple|interpolate_gradient",
       "confidence": 0.0-1.0
     }
@@ -50,7 +53,9 @@ Action rules:
 - legend → "preserve_original" (legend swatches must match whatever they are labeling)
 - gradient_slider → "interpolate_gradient" (preserve endpoints, interpolate middle stops)
 - brand_decorative → "remap_to_purple" (normal converter behavior)
-- chart_series → "remap_to_rag" (use brand accent colors)
+
+Do NOT classify charts, headers, section bars, or decorative accents as rag_indicator \
+unless they clearly encode evaluative status.
 
 If you see no semantic color elements, return has_semantic_color_system: false and an \
 empty semantic_colors array.\

@@ -622,23 +622,64 @@ def _apply_scheme_transforms(base_hex: str, transforms) -> str:
     return _nearest_brand_color(result)
 
 
-def _resolve_color(v: str, rag_preserve: set, has_text: bool = False) -> str | None:
+def _shape_id(sp) -> str | None:
+    """Return cNvPr id for a shape, if available."""
+    if sp is None:
+        return None
+    cNvPr = sp.find(f".//{{{NS_P}}}cNvPr")
+    return cNvPr.get("id") if cNvPr is not None else None
+
+
+def detect_semantic_rag_shape_ids(slide_root) -> set[str]:
+    """Return shape IDs that participate in a structural RAG/status system.
+
+    This is stricter than simple color matching: a shape only qualifies if it is
+    part of a linear R/A/G group or a single gradient spanning R/A/G buckets.
+    Decorative red blocks and arbitrary chart series should not be included.
+    """
+    semantic_ids: set[str] = set()
+
+    for grpSp in slide_root.iter(f"{{{NS_P}}}grpSp"):
+        sp_fills = _grpsp_direct_sp_fills(grpSp)
+        if not (2 <= len(sp_fills) <= 6):
+            continue
+        buckets = {_hue_bucket(h) for _, h, _ in sp_fills} - {None}
+        if not ({"R", "A", "G"} <= buckets):
+            continue
+        xfrms = [xf for _, _, xf in sp_fills]
+        if not _shapes_uniform_and_linear(xfrms):
+            continue
+        for sp, _, _ in sp_fills:
+            sp_id = _shape_id(sp)
+            if sp_id:
+                semantic_ids.add(sp_id)
+
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        if not _is_rag_gradient_shape(sp):
+            continue
+        sp_id = _shape_id(sp)
+        if sp_id:
+            semantic_ids.add(sp_id)
+
+    return semantic_ids
+
+
+def _resolve_color(v: str, rag_preserve: set, semantic_rag: bool = False) -> str | None:
     """Resolve a source hex to a brand target color.
 
     Priority:
       1. RAG preserve set        → return None (keep original)
-      2. Semantic RAG remap      → approved RAG equivalent (skipped when has_text=True)
+      2. Semantic RAG remap      → approved RAG equivalent (only for true RAG/status shapes)
       3. Explicit COLOR_REMAP    → mapped brand color
       4. Red hue detection       → brand purple (RED_REMAP_TARGET)
       5. Nearest Lab match       → closest brand color
 
-    has_text=True: shape contains visible text — treat as a content container,
-    not a semantic indicator. Skips _RAG_REMAP so reds route to purple instead
-    of approved semantic red (EA3323).
+    Red is semantic-only in the brand system. Outside a detected RAG/status
+    context, all reds route away from red and into the normal brand palette.
     """
     if v in rag_preserve:
         return None
-    if not has_text and v in _RAG_REMAP:
+    if semantic_rag and v in _RAG_REMAP:
         return _RAG_REMAP[v]
     if v in COLOR_REMAP:
         return COLOR_REMAP[v]
@@ -943,6 +984,8 @@ def _agent_detect_title(slide_image_path):
             "semantic values: rag_indicator|rating_scale|legend|gradient_slider|status_dot|brand_decorative|icon|diagram|chart. "
             "action: preserve_original (rag/rating/legend/status/icon/diagram/chart) | "
             "remap_to_purple (brand_decorative) | interpolate_gradient (gradient_slider). "
+            "Use red only when it clearly means negative or at-risk status. "
+            "Never treat headers, divider bars, decorative accents, or generic emphasis as semantic red. "
             "If no semantic colors, use [].\n\n"
             "Return JSON only. Start with {. End with }."
         )
@@ -2220,11 +2263,29 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
 
 NS_R_IMG = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
 TRIANGLE_MEDIA_KEY = "ppt/media/triangle_bullet.png"
+LOGO_MEDIA_KEYS = {
+    "primary_default": "ppt/media/fq_primary_logo_default.png",
+    "primary_reverse": "ppt/media/fq_primary_logo_reverse.png",
+    "monogram_default": "ppt/media/fq_monogram_default.png",
+    "monogram_reverse": "ppt/media/fq_monogram_reverse.png",
+}
 
 def _ensure_triangle_media(file_map, triangle_bytes):
     """Embed triangle PNG into file_map once; ensure Content-Type exists."""
     file_map[TRIANGLE_MEDIA_KEY] = triangle_bytes
     # Ensure png Default Content-Type
+    ct_root = etree.fromstring(file_map["[Content_Types].xml"])
+    has_png = any(el.get("Extension") == "png" for el in ct_root)
+    if not has_png:
+        d = etree.SubElement(ct_root, "Default")
+        d.set("Extension", "png")
+        d.set("ContentType", "image/png")
+        file_map["[Content_Types].xml"] = etree.tostring(
+            ct_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
+def _ensure_png_default_content_type(file_map):
+    """Ensure [Content_Types].xml contains the png default mapping."""
     ct_root = etree.fromstring(file_map["[Content_Types].xml"])
     has_png = any(el.get("Extension") == "png" for el in ct_root)
     if not has_png:
@@ -2806,6 +2867,10 @@ PIC_RECOLOR = "765FFF"   # Pivot Purple — dark anchor for duotone on embedded 
 # structured content that must remain legible through the overlaid redaction shapes.
 _SCREENSHOT_AREA_FRAC = 0.20
 
+# Embedded images containing human faces are preserved as-is so headshots and
+# team photos do not get duotone-recolored into the brand palette.
+_FQ_FACEPHOTO_ATTR = "_fq_facephoto"
+
 # Internal attribute used to communicate screenshot identity across passes.
 _FQ_SCREENSHOT_ATTR = "_fq_screenshot"
 
@@ -2829,7 +2894,176 @@ def _pic_bbox(pic):
         return None
 
 
-def recolor_pics(slide_root, slide_w=9144000, slide_h=5143500):
+def _slide_rels_key(slide_path: str) -> str:
+    return re.sub(r"ppt/slides/(slide\d+)\.xml$",
+                  r"ppt/slides/_rels/\1.xml.rels", slide_path)
+
+
+def _resolve_rel_target(base_key: str, target: str) -> str:
+    """Resolve a .rels Target against the rels file location."""
+    base_parts = base_key.split("/")[:-1]
+    out = list(base_parts)
+    for part in target.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(part)
+    return "/".join(out)
+
+
+def _pic_image_bytes(pic, file_map, slide_path: str) -> bytes | None:
+    """Resolve embedded image bytes for a <p:pic> from slide rels."""
+    if not file_map or not slide_path:
+        return None
+    blip = pic.find(f".//{{{NS_A}}}blip")
+    if blip is None:
+        return None
+    rid = blip.get(f"{{{NS_R}}}embed")
+    if not rid:
+        return None
+    rels_key = _slide_rels_key(slide_path)
+    rels_bytes = file_map.get(rels_key)
+    if not rels_bytes:
+        return None
+    try:
+        rels_root = etree.fromstring(rels_bytes)
+    except Exception:
+        return None
+    rel = rels_root.find(f".//{{{NS_REL}}}Relationship[@Id='{rid}']")
+    if rel is None:
+        return None
+    target = rel.get("Target", "")
+    if not target:
+        return None
+    media_key = _resolve_rel_target(rels_key, target)
+    return file_map.get(media_key)
+
+
+def _image_has_face(image_bytes: bytes) -> bool:
+    """Best-effort human face detection using OpenCV when available.
+
+    Returns False on missing dependencies or detection failure so the existing
+    recolor pipeline remains usable in minimal environments.
+    """
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return False
+
+    try:
+        arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return False
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        cascade = cv2.CascadeClassifier(cascade_path)
+        if cascade.empty():
+            return False
+        faces = cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=4,
+            minSize=(32, 32),
+        )
+        return len(faces) > 0
+    except Exception:
+        return False
+
+
+def _pic_embed_rid(pic) -> str | None:
+    blip = pic.find(f".//{{{NS_A}}}blip")
+    if blip is None:
+        return None
+    return blip.get(f"{{{NS_R}}}embed")
+
+
+def _is_corner_logo_candidate(pic, slide_w: int, slide_h: int) -> bool:
+    """Heuristic for small corner logos rather than general images."""
+    bbox = _pic_bbox(pic)
+    if bbox is None:
+        return False
+    x, y, cx, cy = bbox
+    if cx <= 0 or cy <= 0:
+        return False
+    area_frac = (cx * cy) / max(1, slide_w * slide_h)
+    if area_frac > 0.05:
+        return False
+    left = x <= 0.18 * slide_w
+    right = (x + cx) >= 0.82 * slide_w
+    top = y <= 0.22 * slide_h
+    bottom = (y + cy) >= 0.78 * slide_h
+    return (top and (left or right)) or (bottom and left)
+
+
+def _select_logo_asset_key(pic, slide_root) -> str:
+    """Choose the approved FulcrumQ logo variant for this picture slot."""
+    bbox = _pic_bbox(pic) or (0, 0, 1, 1)
+    _, _, cx, cy = bbox
+    aspect = cx / max(cy, 1)
+    dark = _bg_is_dark(_slide_bg_hex(slide_root))
+    if aspect >= 1.8:
+        return "primary_reverse" if dark else "primary_default"
+    return "monogram_reverse" if dark else "monogram_default"
+
+
+def _swap_corner_logos(slide_root, file_map, slide_path: str, slide_w: int, slide_h: int) -> int:
+    """Replace likely source corner logos with approved FulcrumQ logo assets.
+
+    This is intentionally heuristic and narrow:
+      - only small pictures near a slide corner are candidates
+      - square-ish marks become the monogram
+      - wide marks become the primary logo
+    """
+    if not file_map or not slide_path:
+        return 0
+
+    logo_dir = BASE_DIR / "logo package" / "PNG"
+    logo_bytes = {
+        "primary_default": (logo_dir / "primary logo_default.png").read_bytes(),
+        "primary_reverse": (logo_dir / "primary logo_reverse.png").read_bytes(),
+        "monogram_default": (logo_dir / "monogram_default.png").read_bytes(),
+        "monogram_reverse": (logo_dir / "monogram_reverse.png").read_bytes(),
+    }
+    _ensure_png_default_content_type(file_map)
+    for key, media_key in LOGO_MEDIA_KEYS.items():
+        file_map[media_key] = logo_bytes[key]
+
+    rels_key = _slide_rels_key(slide_path)
+    rels_bytes = file_map.get(rels_key)
+    if not rels_bytes:
+        return 0
+    rels_root = etree.fromstring(rels_bytes)
+
+    replaced = 0
+    for pic in slide_root.iter(f"{{{NS_P}}}pic"):
+        if not _is_corner_logo_candidate(pic, slide_w, slide_h):
+            continue
+        rid = _pic_embed_rid(pic)
+        if not rid:
+            continue
+        img_bytes = _pic_image_bytes(pic, file_map, slide_path)
+        if img_bytes and _image_has_face(img_bytes):
+            continue
+        rel = rels_root.find(f".//{{{NS_REL}}}Relationship[@Id='{rid}']")
+        if rel is None:
+            continue
+        asset_key = _select_logo_asset_key(pic, slide_root)
+        rel.set("Target", "../media/" + Path(LOGO_MEDIA_KEYS[asset_key]).name)
+        replaced += 1
+
+    if replaced:
+        file_map[rels_key] = etree.tostring(
+            rels_root, xml_declaration=True, encoding="UTF-8", standalone=True
+        )
+    return replaced
+
+
+def recolor_pics(slide_root, file_map=None, slide_path: str = "", slide_w=9144000, slide_h=5143500):
     """Apply duotone recolor to embedded graphics.
 
     Two tiers:
@@ -2840,7 +3074,10 @@ def recolor_pics(slide_root, slide_w=9144000, slide_h=5143500):
         remains legible.  They are tagged with _fq_screenshot so downstream
         passes can detect overlay shapes sitting on top of them.
 
-    Returns count of images duotone-ified (excludes screenshots).
+      · Human photos / headshots — preserved as-is when optional face detection
+        identifies at least one face in the embedded image.
+
+    Returns count of images duotone-ified (excludes screenshots and face photos).
     """
     slide_area = slide_w * slide_h
     count = 0
@@ -2859,6 +3096,11 @@ def recolor_pics(slide_root, slide_w=9144000, slide_h=5143500):
             if pic_area >= _SCREENSHOT_AREA_FRAC * slide_area:
                 pic.set(_FQ_SCREENSHOT_ATTR, "1")
                 continue   # preserve screenshot as-is
+
+        img_bytes = _pic_image_bytes(pic, file_map, slide_path)
+        if img_bytes and _image_has_face(img_bytes):
+            pic.set(_FQ_FACEPHOTO_ATTR, "1")
+            continue   # preserve human photos as-is
 
         # Remove SVG extension so PowerPoint uses the PNG fallback (SVGs ignore duotone)
         extLst = blip.find(f"{{{NS_A}}}extLst")
@@ -3704,6 +3946,7 @@ def style_slide(slide_root, slide_idx=None, layout_name=""):
 
     # RAG detection only fires for non-table shapes
     rag_preserve = detect_rag_colors(slide_root)
+    semantic_rag_shape_ids = detect_semantic_rag_shape_ids(slide_root)
 
     # ── Shape fill colors ─────────────────────────────────────────────────────
     # Shape backgrounds (spPr > solidFill) use per-slide accent sequencing so
@@ -3728,11 +3971,9 @@ def style_slide(slide_root, slide_idx=None, layout_name=""):
         v = srgb.get("val", "").upper()
         if v in rag_preserve:
             continue
-        # Determine if this colour belongs to a text-bearing shape so reds
-        # in content containers route to purple rather than approved RAG red.
-        enc_sp   = _enclosing_sp(srgb)
-        has_text = _sp_has_visible_text(enc_sp) if enc_sp is not None else False
-        mapped = _resolve_color(v, rag_preserve, has_text=has_text)
+        enc_sp = _enclosing_sp(srgb)
+        semantic_rag = (_shape_id(enc_sp) in semantic_rag_shape_ids) if enc_sp is not None else False
+        mapped = _resolve_color(v, rag_preserve, semantic_rag=semantic_rag)
         if mapped is None:
             continue
         new_val = mapped
@@ -4628,6 +4869,9 @@ def convert(source_path: Path, forced_layouts: dict = None):
         n_names = remap_brand_names(slide_root)
         if n_names:
             print(f"         renamed  : {n_names} 'CEO Works' → 'FulcrumQ'")
+        n_logos = _swap_corner_logos(slide_root, file_map, spath, slide_w, slide_h)
+        if n_logos:
+            print(f"         logos    : {n_logos} corner logo(s) swapped")
         n_fonts, n_colors, n_cased = style_slide(slide_root, slide_idx=i, layout_name=v7_layout_name)
         total_fonts  += n_fonts
         total_colors += n_colors
@@ -4646,7 +4890,7 @@ def convert(source_path: Path, forced_layouts: dict = None):
         if n_bullets:
             print(f"         bullets  : {n_bullets} paragraph(s) normalised")
 
-        n_pics = recolor_pics(slide_root, slide_w, slide_h)
+        n_pics = recolor_pics(slide_root, file_map=file_map, slide_path=spath, slide_w=slide_w, slide_h=slide_h)
         if n_pics:
             print(f"         recolored: {n_pics} picture(s) → brand palette")
 
