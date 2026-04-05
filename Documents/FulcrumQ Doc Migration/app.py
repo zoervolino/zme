@@ -1458,8 +1458,6 @@ with tab_convert:
     # ── Visual Ingest Test mode ────────────────────────────────────────────────
     elif _cmode == "Visual Ingest Test":
 
-        _VIT_RELAY_URL = "https://anyquest-webhook-relay-production-863f.up.railway.app"
-
         _VIT_PROMPT_TMPL = (
             "You are a presentation slide designer. You will receive a rasterized image "
             "of a slide as a file attachment and its cleaned XML structure.\n\n"
@@ -1635,56 +1633,45 @@ with tab_convert:
             return _sv_rasterize(pptx_path, tmp_dir)
 
         def _vit_call_agent(prompt_text, image_bytes, image_name="slide.png"):
-            """Submit prompt plus slide image to AgentRelay and wait for WebSocket response."""
-            import json as _json
-            import requests as _req
+            """Submit prompt plus slide image to Anthropic API and return the response text."""
+            import base64 as _b64
+            import os as _os
             try:
-                import websocket as _ws
+                import anthropic as _anthropic
             except ImportError:
+                raise RuntimeError("anthropic package required: pip install anthropic")
+            _api_key = _os.environ.get("ANTHROPIC_API_KEY")
+            if not _api_key:
                 raise RuntimeError(
-                    "websocket-client not installed — run: pip install websocket-client"
+                    "ANTHROPIC_API_KEY environment variable not set."
                 )
-            _resp = _req.post(
-                f"{_VIT_RELAY_URL}/submit",
-                files={
-                    "agentId": (None, "generic-prompt-agent"),
-                    "Prompt": (None, prompt_text),
-                    "files": (image_name, image_bytes, "image/png"),
-                },
-                timeout=30,
+            _client = _anthropic.Anthropic(api_key=_api_key)
+            _msg = _client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=8192,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": _b64.standard_b64encode(image_bytes).decode("utf-8"),
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt_text,
+                        },
+                    ],
+                }],
             )
-            if not _resp.ok:
-                raise Exception(
-                    f"AgentRelay /submit returned {_resp.status_code}: {_resp.text[:1000]}"
-                )
-            _result = _resp.json()
-            if not _result.get("success"):
-                raise Exception(_result.get("error", "Submission failed"))
-            _wid = _result["webhookId"]
-            _conn = _ws.create_connection(
-                f"wss://anyquest-webhook-relay-production-863f.up.railway.app/ws?id={_wid}",
-                timeout=120,
-            )
-            import time as _time
-            _deadline = _time.time() + 120
-            _tick     = 0
-            _msg      = None
-            while _time.time() < _deadline:
-                _conn.settimeout(30)
-                try:
-                    _msg = _conn.recv()
-                    break
-                except _ws.WebSocketTimeoutException:
-                    _tick += 30
-                    print(f"[AgentRelay] still waiting… {_tick}s elapsed", flush=True)
-            _conn.close()
-            if _msg is None:
-                raise TimeoutError("AgentRelay: no response after 120s")
-            return _json.loads(_msg)["content"]
+            return _msg.content[0].text
 
         # ── UI ────────────────────────────────────────────────────────────────
         st.caption(
-            "Rasterize each slide to PNG, extract structural XML, and render via AI agent. "
+            "Rasterize each slide to PNG, extract structural XML, and render via Claude API. "
             "Results stream in slide-by-slide."
         )
 
@@ -1837,7 +1824,7 @@ with tab_convert:
                                             key=f"vit_dl_{_vi}",
                                         )
                                     elif _v_err == "timeout":
-                                        st.warning("⏱ Agent timed out (120 s) for this slide.")
+                                        st.warning("⏱ API request timed out for this slide.")
                                     else:
                                         st.error(f"Agent error: {_v_err}")
 

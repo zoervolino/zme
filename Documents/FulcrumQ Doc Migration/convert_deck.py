@@ -1439,6 +1439,112 @@ def _shape_font_size(sp):
     return 0
 
 
+def _shape_bbox(sp):
+    """Return (x, y, cx, cy) for a shape, or None if unavailable."""
+    xfrm = sp.find(f".//{{{NS_A}}}xfrm")
+    if xfrm is None:
+        return None
+    off = xfrm.find(f"{{{NS_A}}}off")
+    ext = xfrm.find(f"{{{NS_A}}}ext")
+    if off is None or ext is None:
+        return None
+    try:
+        return (
+            int(off.get("x", 0)),
+            int(off.get("y", 0)),
+            int(ext.get("cx", 0)),
+            int(ext.get("cy", 0)),
+        )
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_text_for_match(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _token_set(text: str) -> set[str]:
+    return set(_normalize_text_for_match(text).split())
+
+
+def _text_overlap_score(a: str, b: str) -> float:
+    """Containment-style overlap score, favoring 'does target cover source?'."""
+    ta = _token_set(a)
+    tb = _token_set(b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    return inter / max(1, min(len(ta), len(tb)))
+
+
+def _is_header_zone(sp, slide_h: int = 6_858_000) -> bool:
+    bbox = _shape_bbox(sp)
+    if bbox is None:
+        return False
+    _, y, _, cy = bbox
+    return y <= int(0.26 * slide_h) or (y + cy) <= int(0.34 * slide_h)
+
+
+def _matching_text_shapes(slide_root, target_text: str, header_only: bool = False,
+                          min_overlap: float = 0.72) -> list:
+    """Find source shapes whose text substantially overlaps target_text."""
+    if not target_text or not target_text.strip():
+        return []
+    spTree = slide_root.find(f".//{{{NS_P}}}spTree")
+    if spTree is None:
+        return []
+    matches = []
+    norm_target = _normalize_text_for_match(target_text)
+    for sp in spTree.findall(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle", "subTitle"}:
+            continue
+        if header_only and not _is_header_zone(sp):
+            continue
+        txt = _shape_text(sp)
+        if not txt:
+            continue
+        norm_txt = _normalize_text_for_match(txt)
+        if not norm_txt:
+            continue
+        score = _text_overlap_score(norm_txt, norm_target)
+        contains = norm_target in norm_txt or norm_txt in norm_target
+        if score >= min_overlap or contains:
+            matches.append(sp)
+    return matches
+
+
+def _subtitle_is_banner_like(slide_root, subtitle_text: str,
+                             slide_w: int = 12_192_000,
+                             slide_h: int = 6_858_000) -> bool:
+    """Reject paragraph-like banner text from becoming a subtitle.
+
+    Wrapped subtitles are allowed. We only reject text that behaves like a body
+    intro banner: long copy, wide shallow shape, and located in the header band.
+    """
+    if not subtitle_text or not subtitle_text.strip():
+        return False
+    words = subtitle_text.split()
+    chars = len(subtitle_text.strip())
+    punct = sum(subtitle_text.count(ch) for ch in ".;:!?")
+    if chars > 260 or len(words) > 34:
+        return True
+    candidates = _matching_text_shapes(slide_root, subtitle_text, header_only=True, min_overlap=0.60)
+    for sp in candidates:
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        _, _, cx, cy = bbox
+        wide = cx >= int(0.55 * slide_w)
+        shallow = cy <= int(0.20 * slide_h)
+        longish = len(words) >= 18 or chars >= 120 or punct >= 2
+        if wide and shallow and longish:
+            return True
+    return False
+
+
 def _has_colored_block_title(slide_root):
     """
     Returns True if the slide has the 'section divider' visual pattern.
@@ -1596,15 +1702,14 @@ def _scan_slide_content(slide_root):
 def _validate_subtitle(text: str):
     """Return text if it is a valid subtitle, else None.
 
-    Rejects empty strings, bullet-started lines, multi-line content, and
-    ALL-CAPS kicker labels (≤5 words).
+    Rejects empty strings, bullet-started content, and ALL-CAPS kicker labels
+    (≤5 words). Wrapped subtitles are allowed; banner-like paragraph blocks are
+    rejected later using shape geometry.
     """
     if not text or not text.strip():
         return None
     t = text.strip()
     if t.startswith(("-", "•", "·", "*", "–", "—")):
-        return None
-    if "\n" in t or len(t.splitlines()) > 1:
         return None
     words = t.split()
     if len(words) <= 5 and t == t.upper() and any(c.isalpha() for c in t):
@@ -1646,16 +1751,19 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
         matched_label  = f"→ {DEFAULT_LAYOUT}"
 
     # ── Subtitle detection (agent-only) ───────────────────────────────────────
-    has_subtitle = bool(
-        agent_hint
-        and agent_hint.get("subtitle") is not None
-        and _validate_subtitle(agent_hint.get("subtitle", "")) is not None
-    )
+    _subtitle_candidate = None
+    if agent_hint and agent_hint.get("subtitle") is not None:
+        _subtitle_candidate = _validate_subtitle(agent_hint.get("subtitle", ""))
+        if _subtitle_candidate and slide_root is not None:
+            if _subtitle_is_banner_like(slide_root, _subtitle_candidate):
+                _subtitle_candidate = None
+    has_subtitle = bool(_subtitle_candidate)
 
     # ── Agent early return ────────────────────────────────────────────────────
     # If agent ran successfully, use its signals directly — bypass content scan.
     # Exceptions: Dividers, Endings, and Covers are still detected structurally.
     if agent_hint is not None and slide_root is not None:
+        m = _scan_slide_content(slide_root)
         # Divider: trust semantic match if it resolved to a divider layout
         if matched_layout in ("Divider_Dark", "Divider_Light", "Divider_Crystal"):
             layout_path = v7_name_map.get(matched_layout)
@@ -1676,8 +1784,15 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
             name = "Dark_Sub" if has_subtitle else "Title_Only_Dark"
         else:
             name = "Light_Sub" if has_subtitle else "Title_Only_Light"
-        # Cover exception: slide 1 gets Cover layout
-        if slide_idx == 1:
+        # Cover exception only when slide 1 is genuinely sparse / cover-like.
+        looks_like_cover = (
+            slide_idx == 1
+            and m["body_chars"] < 80
+            and m["n_extra"] <= 1
+            and m["total_chars"] < 180
+            and not m["is_divider_block"]
+        )
+        if looks_like_cover:
             cover = "Cover_Dark" if is_dark else "Cover_Light"
             if cover in v7_name_map:
                 name = cover
@@ -2197,8 +2312,27 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
                 if shape_text and shape_text in (title_norm, sub_norm):
                     to_remove.append(sp)
 
+    # Remove top-of-slide source title fragments even when they are split across
+    # shapes or formatted differently than the injected canonical title string.
+    for sp in _matching_text_shapes(slide_root, title_text, header_only=True, min_overlap=0.68):
+        if sp not in to_remove:
+            to_remove.append(sp)
+
+    # Remove subtitle source shapes only when the subtitle was accepted as a
+    # compact subtitle, not a banner/body-intro paragraph.
+    if subtitle_text:
+        for sp in _matching_text_shapes(slide_root, subtitle_text, header_only=True, min_overlap=0.80):
+            bbox = _shape_bbox(sp)
+            if bbox is None:
+                continue
+            _, _, cx, cy = bbox
+            smallish = cx <= int(0.60 * 12_192_000) and cy <= int(0.16 * 6_858_000)
+            if smallish and sp not in to_remove:
+                to_remove.append(sp)
+
     for sp in to_remove:
-        spTree.remove(sp)
+        if sp.getparent() is spTree:
+            spTree.remove(sp)
 
     # -- Helper: build a minimal placeholder <p:sp> ----------------------------
     def _make_ph_sp(ph_type, ph_idx, text, sp_id, sp_name):
@@ -3780,26 +3914,14 @@ def enforce_text_contrast(slide_root, rag_preserve: set) -> int:
             # Explicit fill: full bidirectional contrast enforcement
             _enforce_runs(sp, _bg_is_dark(fill))
         else:
-            # NoFill: only act when a dark shape is detected underneath via z-order.
-            # Do NOT flip explicit text colors otherwise — text may be white-on-dark-layout.
+            # NoFill: derive contrast from the topmost overlapping filled shape below.
+            # This catches text strips/cards whose text lives in a transparent label
+            # box sitting on a separate filled rectangle, while preserving any accent
+            # runs inside the line (for example "79 Critical Roles").
             under = _overlapping_fill_below(sp, slide_root)
-            if under is not None and _bg_is_dark(under):
-                # Force white; but only flip dark→white (never light→dark here,
-                # since we can't be sure the whole shape is over the dark area)
-                for tag in (f"{{{NS_A}}}rPr", f"{{{NS_A}}}endParaRPr", f"{{{NS_A}}}defRPr"):
-                    for rPr in sp.iter(tag):
-                        sf = rPr.find(f"{{{NS_A}}}solidFill")
-                        if sf is not None:
-                            srgb     = sf.find(f"{{{NS_A}}}srgbClr")
-                            existing = srgb.get("val", "").upper() if srgb is not None else ""
-                            if existing in rag_preserve or existing in _FONT_ACCENT_PRESERVE:
-                                continue
-                            if _bg_is_dark(existing):   # dark text on detected dark bg
-                                _set_rpr_color(rPr, "FFFFFF")
-                                n += 1
-                        else:
-                            _set_rpr_color(rPr, "FFFFFF")
-                            n += 1
+            if under is not None:
+                want = "FFFFFF" if _bg_is_dark(under) else "1D1D1D"
+                n += _set_text_color_preserving_emphasis(sp, want, rag_preserve)
 
     # ── Table cells (only when cell has explicit dark fill) ───────────────────
     slide_bg = _slide_bg_hex(slide_root)
@@ -3820,6 +3942,7 @@ def enforce_text_contrast(slide_root, rag_preserve: set) -> int:
             _enforce_runs(tc, _bg_is_dark(cell_fill))
 
     n += _enforce_contrast_final_sweep(slide_root, rag_preserve)
+    n += _enforce_mixed_emphasis_contrast(slide_root, rag_preserve)
     return n
 
 
@@ -3871,6 +3994,68 @@ def _enforce_contrast_final_sweep(slide_root, rag_preserve: set) -> int:
                     _set_rpr_color(rPr, "1D1D1D")
                     n += 1
                 # else: adequate contrast — leave alone
+    return n
+
+
+def _enforce_mixed_emphasis_contrast(slide_root, rag_preserve: set) -> int:
+    """Preserve accent/emphasis runs while forcing neighboring text readable.
+
+    If a shape contains at least one intentional accent run (brand accent or
+    RAG-preserved color), then every other run in that same text block should
+    fall back to a high-contrast neutral against the final shape fill.
+    """
+    n = 0
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        fill_hex = _shape_fill_hex(sp)
+        if fill_hex is None:
+            continue
+        dark_bg = _bg_is_dark(fill_hex)
+        want = "FFFFFF" if dark_bg else "1D1D1D"
+
+        has_emphasis = False
+        for rPr in sp.iter(f"{{{NS_A}}}rPr"):
+            sf = rPr.find(f"{{{NS_A}}}solidFill")
+            srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
+            existing = srgb.get("val", "").upper() if srgb is not None else ""
+            if existing in rag_preserve or existing in _FONT_ACCENT_PRESERVE:
+                has_emphasis = True
+                break
+        if not has_emphasis:
+            continue
+
+        for r in sp.iter(f"{{{NS_A}}}r"):
+            rPr = r.find(f"{{{NS_A}}}rPr")
+            if rPr is None:
+                rPr = etree.Element(f"{{{NS_A}}}rPr")
+                r.insert(0, rPr)
+                _set_rpr_color(rPr, want)
+                n += 1
+                continue
+            sf = rPr.find(f"{{{NS_A}}}solidFill")
+            srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
+            existing = srgb.get("val", "").upper() if srgb is not None else ""
+            if existing in rag_preserve or existing in _FONT_ACCENT_PRESERVE:
+                continue
+            if existing != want:
+                _set_rpr_color(rPr, want)
+                n += 1
+
+        for p in sp.iter(f"{{{NS_A}}}p"):
+            end_rpr = p.find(f"{{{NS_A}}}endParaRPr")
+            if end_rpr is None:
+                end_rpr = etree.SubElement(p, f"{{{NS_A}}}endParaRPr")
+                _set_rpr_color(end_rpr, want)
+                n += 1
+                continue
+            sf = end_rpr.find(f"{{{NS_A}}}solidFill")
+            srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
+            existing = srgb.get("val", "").upper() if srgb is not None else ""
+            if existing in rag_preserve or existing in _FONT_ACCENT_PRESERVE:
+                continue
+            if existing != want:
+                _set_rpr_color(end_rpr, want)
+                n += 1
+
     return n
 
 
@@ -4481,6 +4666,43 @@ def _set_all_text_color(sp, hex_val: str) -> int:
     return n
 
 
+def _set_text_color_preserving_emphasis(sp, hex_val: str, rag_preserve: set) -> int:
+    """Set readable neutral text while preserving intentional accent runs."""
+    n = 0
+    for r in sp.iter(f"{{{NS_A}}}r"):
+        rPr = r.find(f"{{{NS_A}}}rPr")
+        if rPr is None:
+            rPr = etree.Element(f"{{{NS_A}}}rPr")
+            r.insert(0, rPr)
+            _set_rpr_color(rPr, hex_val)
+            n += 1
+            continue
+        sf = rPr.find(f"{{{NS_A}}}solidFill")
+        srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
+        existing = srgb.get("val", "").upper() if srgb is not None else ""
+        if existing in rag_preserve or existing in _FONT_ACCENT_PRESERVE:
+            continue
+        if existing != hex_val:
+            _set_rpr_color(rPr, hex_val)
+            n += 1
+    for p in sp.iter(f"{{{NS_A}}}p"):
+        end_rpr = p.find(f"{{{NS_A}}}endParaRPr")
+        if end_rpr is None:
+            end_rpr = etree.SubElement(p, f"{{{NS_A}}}endParaRPr")
+            _set_rpr_color(end_rpr, hex_val)
+            n += 1
+            continue
+        sf = end_rpr.find(f"{{{NS_A}}}solidFill")
+        srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
+        existing = srgb.get("val", "").upper() if srgb is not None else ""
+        if existing in rag_preserve or existing in _FONT_ACCENT_PRESERVE:
+            continue
+        if existing != hex_val:
+            _set_rpr_color(end_rpr, hex_val)
+            n += 1
+    return n
+
+
 def style_compound_groups(slide_root, rag_preserve: set) -> int:
     """
     Style grouped shapes as compound semantic objects.
@@ -4534,7 +4756,7 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
             if fill in rag_preserve:
                 continue
             tc = "FFFFFF" if _bg_is_dark(fill) else "1D1D1D"
-            count += _set_all_text_color(sp, tc)
+            count += _set_text_color_preserving_emphasis(sp, tc, rag_preserve)
 
         # Pattern B — bg rect + label pair(s)
         if bg_shapes and label_shapes:
@@ -4543,7 +4765,7 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
             if bg_fill and bg_fill not in rag_preserve:
                 tc = "FFFFFF" if _bg_is_dark(bg_fill) else "1D1D1D"
                 for lsp in label_shapes:
-                    count += _set_all_text_color(lsp, tc)
+                    count += _set_text_color_preserving_emphasis(lsp, tc, rag_preserve)
 
     return count
 
@@ -4779,6 +5001,10 @@ def convert(source_path: Path, forced_layouts: dict = None):
         # ── Title / subtitle injection ──────────────────────────────────────────
         _agent_title    = _det.get("title")    if _det else None
         _agent_subtitle = _det.get("subtitle") if _det else None
+        _agent_subtitle = _validate_subtitle(_agent_subtitle) if _agent_subtitle else None
+        if _agent_subtitle and _subtitle_is_banner_like(slide_root, _agent_subtitle, slide_w, slide_h):
+            print(f"         subtitle : rejected banner-style paragraph block")
+            _agent_subtitle = None
 
         if _agent_title:
             # Upgrade to _Sub layout variant if agent detected a subtitle
