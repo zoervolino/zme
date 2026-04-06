@@ -942,6 +942,74 @@ EMU = 914400  # 1 inch in EMU
 _AGENT_RELAY_URL = "https://anyquest-webhook-relay-production-863f.up.railway.app"
 
 
+def _normalize_agent_detection(parsed: dict | None) -> dict | None:
+    """Normalize lightweight vision-agent output into a stable converter contract."""
+    if not isinstance(parsed, dict):
+        return None
+
+    def _clean_text(val):
+        if val is None:
+            return None
+        txt = str(val).strip()
+        if not txt:
+            return None
+        txt = re.sub(r"\s+([:;.,!?])", r"\1", txt)
+        txt = re.sub(r"\s{2,}", " ", txt).strip()
+        if txt.lower() in {"n/a", "na", "none", "null", "no subtitle", "no subtitle present"}:
+            return None
+        return txt
+
+    title = _clean_text(parsed.get("title"))
+    if not title or len(title) < 2:
+        return None
+
+    subtitle = _clean_text(parsed.get("subtitle"))
+    subtitle_present = parsed.get("subtitle_present")
+    if isinstance(subtitle_present, str):
+        subtitle_present = subtitle_present.strip().lower() in {"true", "yes", "1"}
+    elif subtitle_present is None:
+        subtitle_present = bool(subtitle)
+    else:
+        subtitle_present = bool(subtitle_present)
+    if not subtitle_present:
+        subtitle = None
+
+    slide_type = str(parsed.get("slide_type") or "content").strip().lower()
+    if slide_type not in {"cover", "divider", "content", "ending"}:
+        slide_type = "content"
+
+    recommended_layout = parsed.get("recommended_layout")
+    if recommended_layout is not None:
+        recommended_layout = str(recommended_layout).strip() or None
+
+    confidence = parsed.get("confidence", 0.0)
+    try:
+        confidence = float(confidence)
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    color_semantics = parsed.get("color_semantics")
+    if not isinstance(color_semantics, list):
+        color_semantics = []
+
+    visual_schema = parsed.get("visual_schema")
+    if not isinstance(visual_schema, dict):
+        visual_schema = {}
+
+    return {
+        "title": title,
+        "subtitle": subtitle,
+        "subtitle_present": subtitle_present,
+        "slide_type": slide_type,
+        "recommended_layout": recommended_layout,
+        "confidence": confidence,
+        "reason": str(parsed.get("reason") or "").strip(),
+        "color_semantics": color_semantics,
+        "visual_schema": visual_schema,
+    }
+
+
 def _agent_detect_title(slide_image_path):
     """
     Sends a rasterized slide PNG to the vision-capable AnyQuest agent via file upload.
@@ -972,13 +1040,22 @@ def _agent_detect_title(slide_image_path):
             "RESPOND WITH JSON ONLY. No markdown, no prose, no explanation. "
             "Your entire response must be a single JSON object starting with { and ending with }.\n\n"
             "Analyze the attached slide image and return this exact structure:\n\n"
-            '{"title":"<title text or null>","subtitle":"<subtitle text or null>",'
-            '"slide_type":"cover|divider|content|ending","confidence":0.0,'
-            '"reason":"<one sentence>","color_semantics":[]}\n\n'
+            '{"title":"<title text>","subtitle_present":true,"subtitle":"<subtitle text or N/A>",'
+            '"slide_type":"cover|divider|content|ending","recommended_layout":"<layout name or null>",'
+            '"confidence":0.0,"reason":"<one sentence>","color_semantics":[],'
+            '"visual_schema":{"layout_pattern":"<very short pattern>","top_region":"<very short>","risk_flags":[]}}\n\n'
             "TITLE: the largest/boldest heading text near the top. Not bullets, not body, not footer.\n"
-            "SUBTITLE: smaller supporting text directly below the title. Not bullets, not body.\n"
+            "SUBTITLE_PRESENT: true only when there is a real supporting subtitle directly under the title.\n"
+            "If there is no true subtitle, set subtitle_present=false and subtitle='N/A'.\n"
+            "Do not use a banner paragraph, body intro, bullets, or footer text as the subtitle.\n"
             "SLIDE TYPE: cover=opening slide | divider=section break with bold bg | "
             "content=body with bullets/data | ending=thank you/questions/contact\n"
+            "RECOMMENDED_LAYOUT: one of Cover_Light|Cover_Dark|Divider_Dark|Divider_Crystal|"
+            "Ending_PivotPurple|Title_Only_Light|Title_Only_Dark|Light_Sub|Dark_Sub|Content_Light|Content_Light_Sub|"
+            "or null if unsure.\n"
+            "VISUAL_SCHEMA: keep it lightweight. layout_pattern should be a short phrase like "
+            "'title + 3 columns + footer'. top_region should briefly describe title/subtitle/banner hierarchy. "
+            "risk_flags should be a short array such as ['banner_like_intro','screenshot_heavy','dense_diagram'].\n"
             "COLOR SEMANTICS: for each colored element group, add an object with "
             "{description, semantic, action}. "
             "semantic values: rag_indicator|rating_scale|legend|gradient_slider|status_dot|brand_decorative|icon|diagram|chart. "
@@ -1052,8 +1129,17 @@ def _agent_detect_title(slide_image_path):
                 _t = _title.group(1).strip().strip("*").strip()
                 if len(_t) >= 2:
                     print(f"         [agent-title] prose fallback title: {_t!r}", flush=True)
-                    return {"title": _t, "subtitle": None, "slide_type": "content",
-                            "confidence": 0.5, "reason": "prose fallback", "color_semantics": []}
+                    return _normalize_agent_detection({
+                        "title": _t,
+                        "subtitle_present": False,
+                        "subtitle": "N/A",
+                        "slide_type": "content",
+                        "recommended_layout": None,
+                        "confidence": 0.5,
+                        "reason": "prose fallback",
+                        "color_semantics": [],
+                        "visual_schema": {},
+                    })
             print(f"         [agent-title] no JSON in response: {content[:100]}", flush=True)
             return None
         depth, end = 0, -1
@@ -1070,14 +1156,8 @@ def _agent_detect_title(slide_image_path):
             return None
 
         parsed = _json.loads(content[start:end])
-
-        # Guard against echoed template / bad responses
-        title = parsed.get("title", "") or ""
-        bad_values = {
-            "null", "none", "exact title text visible on slide",
-            "exact title text", "the title text",
-        }
-        if title.lower().strip() in bad_values or len(title.strip()) < 2:
+        parsed = _normalize_agent_detection(parsed)
+        if parsed is None:
             print(f"         [agent-title] bad response: {content[:100]}", flush=True)
             return None
 
@@ -1752,7 +1832,7 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
 
     # ── Subtitle detection (agent-only) ───────────────────────────────────────
     _subtitle_candidate = None
-    if agent_hint and agent_hint.get("subtitle") is not None:
+    if agent_hint and agent_hint.get("subtitle_present") and agent_hint.get("subtitle") is not None:
         _subtitle_candidate = _validate_subtitle(agent_hint.get("subtitle", ""))
         if _subtitle_candidate and slide_root is not None:
             if _subtitle_is_banner_like(slide_root, _subtitle_candidate):
@@ -4970,12 +5050,19 @@ def convert(source_path: Path, forced_layouts: dict = None):
             if _det:
                 _agent_hint = _det.get("title")
                 _conf = _det.get("confidence", 0)
-                _sub  = _det.get("subtitle")
+                _sub_present = bool(_det.get("subtitle_present"))
+                _sub  = _det.get("subtitle") if _sub_present else None
+                _layout_hint = _det.get("recommended_layout")
+                _v_schema = _det.get("visual_schema") or {}
                 print(
                     f'         Agent title: "{_agent_hint}" (confidence: {_conf:.2f})'
                     + (f'  subtitle: "{_sub}"' if _sub else ""),
                     flush=True,
                 )
+                if _layout_hint:
+                    print(f"         Agent layout hint: {_layout_hint}", flush=True)
+                if _v_schema:
+                    print(f"         Agent visual schema: pattern={_v_schema.get('layout_pattern','')!r} flags={_v_schema.get('risk_flags',[])}", flush=True)
 
             # Use vision color semantics to expand rag_preserve
             if _det and _det.get('color_semantics'):
@@ -5000,7 +5087,7 @@ def convert(source_path: Path, forced_layouts: dict = None):
 
         # ── Title / subtitle injection ──────────────────────────────────────────
         _agent_title    = _det.get("title")    if _det else None
-        _agent_subtitle = _det.get("subtitle") if _det else None
+        _agent_subtitle = _det.get("subtitle") if (_det and _det.get("subtitle_present")) else None
         _agent_subtitle = _validate_subtitle(_agent_subtitle) if _agent_subtitle else None
         if _agent_subtitle and _subtitle_is_banner_like(slide_root, _agent_subtitle, slide_w, slide_h):
             print(f"         subtitle : rejected banner-style paragraph block")
