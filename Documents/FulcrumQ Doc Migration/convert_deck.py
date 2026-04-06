@@ -5000,37 +5000,44 @@ def _style_table_body_bands(slide_root) -> int:
 _KICKER_BULLET_GLYPHS = {"•", "▪", "‣", "–", "—", "›", "»", "·"}
 
 def _remove_duplicate_header_title_fragments(slide_root) -> int:
-    """Remove short free-form header fragments that duplicate the final title.
+    """Remove short header fragments that duplicate the final title/subtitle.
 
     Some legacy decks carry a small kicker/bullet line above the real title that
-    repeats the exact same copy. After title injection/promotion, treat the title
-    placeholder as canonical and remove those duplicate source fragments.
+    repeats the exact same copy. Others keep a large legacy subtitle/headline in
+    the header band after we inject or promote the canonical title/subtitle.
+    Treat the placeholder text as canonical and remove duplicate source fragments.
     """
     spTree = slide_root.find(f".//{{{NS_P}}}spTree")
     if spTree is None:
         return 0
 
-    title_text = ""
-    title_y = None
-    title_font = 0
+    canonical = []
     for sp in spTree.findall(f"{{{NS_P}}}sp"):
         ph = sp.find(f".//{{{NS_P}}}ph")
-        if ph is None or ph.get("type", "") not in {"title", "ctrTitle"}:
+        if ph is None:
             continue
-        title_text = _shape_text(sp).strip()
+        ph_type = ph.get("type", "")
+        ph_idx = ph.get("idx", "")
+        is_title = ph_type in {"title", "ctrTitle"}
+        is_sub = ph_type == "subTitle" or (ph_type == "body" and ph_idx == "12")
+        if not (is_title or is_sub):
+            continue
+        text = _shape_text(sp).strip()
+        if not text:
+            continue
         bbox = _shape_bbox(sp)
-        if bbox is not None:
-            _, title_y, _, _ = bbox
-        title_font = _shape_font_size(sp)
-        if title_text:
-            break
-    if not title_text:
+        y = bbox[1] if bbox is not None else None
+        canonical.append({
+            "text": text,
+            "norm": _normalize_text_for_match(text),
+            "y": y,
+            "font": _shape_font_size(sp),
+            "kind": "title" if is_title else "subtitle",
+        })
+    if not canonical:
         return 0
 
-    norm_title = _normalize_text_for_match(title_text)
-    if not norm_title:
-        return 0
-
+    max_canonical_len = max((len(item["text"]) for item in canonical), default=80)
     removed = 0
     for sp in list(spTree.findall(f"{{{NS_P}}}sp")):
         ph = sp.find(f".//{{{NS_P}}}ph")
@@ -5040,7 +5047,7 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
             continue
 
         txt = _shape_text(sp).strip()
-        if not txt or len(txt) > max(140, int(len(title_text) * 1.25)):
+        if not txt or len(txt) > max(140, int(max_canonical_len * 1.25)):
             continue
         paragraphs = list(sp.iter(f"{{{NS_A}}}p"))
         if len(paragraphs) > 2:
@@ -5052,25 +5059,226 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
         _, y, _, cy = bbox
         if cy > int(0.12 * 6_858_000):
             continue
-        if title_y is not None and y > title_y + int(0.06 * 6_858_000):
-            continue
 
         norm_txt = _normalize_text_for_match(txt)
         if not norm_txt:
             continue
-        overlap = _text_overlap_score(norm_txt, norm_title)
-        contains = norm_title in norm_txt or norm_txt in norm_title
-        if overlap < 0.72 and not contains:
-            continue
-
         candidate_font = _shape_font_size(sp)
-        if candidate_font and title_font and candidate_font > int(title_font * 1.10):
+
+        matched = False
+        for item in canonical:
+            overlap = _text_overlap_score(norm_txt, item["norm"])
+            contains = item["norm"] in norm_txt or norm_txt in item["norm"]
+            if overlap < 0.72 and not contains:
+                continue
+            if item["y"] is not None and y > item["y"] + int(0.10 * 6_858_000):
+                continue
+            if item["kind"] == "title" and candidate_font and item["font"] and candidate_font > int(item["font"] * 1.10):
+                continue
+            matched = True
+            break
+        if not matched:
             continue
 
         spTree.remove(sp)
         removed += 1
 
     return removed
+
+
+def _promote_header_kicker_title(slide_root) -> bool:
+    """If a short kicker sits above a large title, make the kicker the title.
+
+    This handles legacy slides like:
+      OUTPUT 1
+      Assess implementation risks and actions to mitigate
+
+    where the short kicker should land in the title placeholder and the larger
+    headline should become the subtitle.
+    """
+    spTree = slide_root.find(f".//{{{NS_P}}}spTree")
+    if spTree is None:
+        return False
+
+    title_sp = None
+    title_text = ""
+    title_bbox = None
+    title_font = 0
+    for sp in spTree.findall(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle"}:
+            title_sp = sp
+            title_text = _shape_text(sp).strip()
+            title_bbox = _shape_bbox(sp)
+            title_font = _shape_font_size(sp)
+            break
+    if title_sp is None or not title_text or title_bbox is None:
+        return False
+
+    title_norm = _normalize_text_for_match(title_text)
+    title_x, title_y, title_cx, title_cy = title_bbox
+    title_bottom = title_y + title_cy
+
+    def _looks_like_kicker(text: str) -> bool:
+        words = text.split()
+        if not words or len(words) > 7 or len(text) > 48:
+            return False
+        if re.fullmatch(r"(output|input|phase|step|section|chapter)\s+\d+[a-z]?", text, re.IGNORECASE):
+            return True
+        if re.fullmatch(r"[A-Za-z0-9&/+\- ]{3,48}", text) and len(words) <= 4:
+            return True
+        return False
+
+    best = None
+    best_score = None
+    for sp in spTree.findall(f"{{{NS_P}}}sp"):
+        if sp is title_sp:
+            continue
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"subTitle", "dt", "ftr", "sldNum"}:
+            continue
+        txt = _shape_text(sp).strip()
+        if not txt or txt.startswith(("-", "•", "·", "*", "–", "—")):
+            continue
+        norm_txt = _normalize_text_for_match(txt)
+        if not norm_txt or norm_txt == title_norm:
+            continue
+        if not _looks_like_kicker(txt):
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        x, y, cx, cy = bbox
+        if y >= title_y or y > int(0.18 * 6_858_000):
+            continue
+        if y + cy > title_y + int(0.02 * 6_858_000):
+            continue
+        if cx > int(title_cx * 0.45):
+            continue
+        if x > title_x + int(0.15 * 12_192_000):
+            continue
+        cand_font = _shape_font_size(sp)
+        if title_font and cand_font and cand_font >= int(title_font * 0.72):
+            continue
+        score = (cand_font or 0, -y, -len(txt))
+        if best is None or score > best_score:
+            best = sp
+            best_score = score
+
+    if best is None:
+        return False
+
+    # Turn the current title into the subtitle placeholder so it inherits the
+    # real subtitle position/style on Light_Sub-like layouts.
+    title_ph = title_sp.find(f".//{{{NS_P}}}ph")
+    if title_ph is None:
+        return False
+    title_ph.set("type", "body")
+    title_ph.set("idx", "12")
+    title_spPr = title_sp.find(f"{{{NS_P}}}spPr")
+    if title_spPr is not None:
+        for xfrm in title_spPr.findall(f"{{{NS_A}}}xfrm"):
+            title_spPr.remove(xfrm)
+
+    best_nvSpPr = best.find(f"{{{NS_P}}}nvSpPr")
+    if best_nvSpPr is None:
+        return False
+    best_nvPr = best_nvSpPr.find(f"{{{NS_P}}}nvPr")
+    if best_nvPr is None:
+        best_nvPr = etree.SubElement(best_nvSpPr, f"{{{NS_P}}}nvPr")
+    for old in list(best_nvPr.findall(f"{{{NS_P}}}ph")):
+        best_nvPr.remove(old)
+    best_ph = etree.SubElement(best_nvPr, f"{{{NS_P}}}ph")
+    best_ph.set("type", "title")
+    best_spPr = best.find(f"{{{NS_P}}}spPr")
+    if best_spPr is not None:
+        for xfrm in best_spPr.findall(f"{{{NS_A}}}xfrm"):
+            best_spPr.remove(xfrm)
+    txBody = best.find(f"{{{NS_P}}}txBody")
+    if txBody is not None:
+        for lst in txBody.findall(f"{{{NS_A}}}lstStyle"):
+            txBody.remove(lst)
+
+    return True
+
+
+def _promote_header_subtitle_candidate(slide_root) -> bool:
+    """Promote a strong secondary header line to the subtitle slot in fallback mode."""
+    spTree = slide_root.find(f".//{{{NS_P}}}spTree")
+    if spTree is None:
+        return False
+
+    title_sp = None
+    title_text = ""
+    title_bbox = None
+    for sp in spTree.findall(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle"}:
+            title_sp = sp
+            title_text = _shape_text(sp).strip()
+            title_bbox = _shape_bbox(sp)
+            break
+    if title_sp is None or not title_text:
+        return False
+
+    for sp in spTree.findall(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and (ph.get("type", "") == "subTitle" or (ph.get("type", "") == "body" and ph.get("idx", "") == "12")):
+            return False
+
+    title_norm = _normalize_text_for_match(title_text)
+    title_bottom = (title_bbox[1] + title_bbox[3]) if title_bbox is not None else int(0.12 * 6_858_000)
+    candidates = []
+    for sp in spTree.findall(f"{{{NS_P}}}sp"):
+        if sp is title_sp:
+            continue
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle", "dt", "ftr", "sldNum"}:
+            continue
+        txt = _shape_text(sp).strip()
+        if not txt or txt.startswith(("-", "•", "·", "*", "–", "—")):
+            continue
+        if len(txt) < 12 or len(txt) > 180:
+            continue
+        norm_txt = _normalize_text_for_match(txt)
+        if not norm_txt or norm_txt == title_norm:
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        _, y, cx, cy = bbox
+        if y < title_bottom - int(0.03 * 6_858_000) or y > int(0.30 * 6_858_000):
+            continue
+        if cy > int(0.18 * 6_858_000):
+            continue
+        font = _shape_font_size(sp)
+        score = (font, cx * cy)
+        candidates.append((score, sp))
+
+    if not candidates:
+        return False
+
+    _, best = max(candidates, key=lambda item: item[0])
+    nvSpPr = best.find(f"{{{NS_P}}}nvSpPr")
+    if nvSpPr is None:
+        return False
+    nvPr = nvSpPr.find(f"{{{NS_P}}}nvPr")
+    if nvPr is None:
+        nvPr = etree.SubElement(nvSpPr, f"{{{NS_P}}}nvPr")
+    for old in nvPr.findall(f"{{{NS_P}}}ph"):
+        nvPr.remove(old)
+    ph_el = etree.SubElement(nvPr, f"{{{NS_P}}}ph")
+    ph_el.set("type", "body")
+    ph_el.set("idx", "12")
+    spPr = best.find(f"{{{NS_P}}}spPr")
+    if spPr is not None:
+        for xfrm in spPr.findall(f"{{{NS_A}}}xfrm"):
+            spPr.remove(xfrm)
+    txBody = best.find(f"{{{NS_P}}}txBody")
+    if txBody is not None:
+        for lst in txBody.findall(f"{{{NS_A}}}lstStyle"):
+            txBody.remove(lst)
+    return True
 
 def _normalize_kicker_labels(slide_root) -> int:
     """Strip stray bullet glyphs from short standalone text near the title region.
@@ -5614,7 +5822,14 @@ def convert(source_path: Path, forced_layouts: dict = None):
             if promoted:
                 print(f"         promoted: body ph → title")
 
+            kicker_promoted = _promote_header_kicker_title(slide_root)
+            if kicker_promoted:
+                print(f"         promoted: header kicker → title, prior title → subtitle")
+
             subtitle_parts = split_title_subtitle(slide_root)
+            promoted_subtitle = _promote_header_subtitle_candidate(slide_root)
+            if promoted_subtitle:
+                print(f"         promoted: header line → subtitle")
             has_existing_subtitle_ph = any(
                 sp.find(f".//{{{NS_P}}}ph") is not None
                 and (
