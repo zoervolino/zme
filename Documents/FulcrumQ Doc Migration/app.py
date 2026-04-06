@@ -1630,7 +1630,15 @@ with tab_convert:
             "The overall composition should feel like the same slide, not a redesign.\n\n"
             "Region JSON:\n"
             "{region_json}\n\n"
-            "Output ---HTML--- and then raw HTML markup only.\n"
+            "First output ---PPTX_LAYOUT--- followed by valid JSON with this schema:\n"
+            "{\n"
+            '  "layout_name": "Content_Light|Content_Light_Sub|Title_Only_Light|Blank_Light",\n'
+            '  "regions": [same schema as input, but refined for final placement]\n'
+            "}\n"
+            "- Refine spacing, grouping, alignment, and sizing so the slide feels polished and coherent\n"
+            "- Keep screenshot-heavy regions marked preserve_as_image=true when appropriate\n"
+            "- This refined JSON will be used to build native PPTX objects, so improve composition where helpful\n\n"
+            "Then output ---HTML--- and raw HTML markup only.\n"
             "Do not wrap the HTML in quotes or JSON.\n"
             "Do not use markdown code fences.\n"
             "The first non-whitespace character after ---HTML--- must be <"
@@ -1753,8 +1761,8 @@ with tab_convert:
                         return None
             return None
 
-        def _vit_extract_html(raw_text: str) -> str | None:
-            """Recover HTML reliably from relay/model output."""
+        def _vit_extract_html_and_layout(raw_text: str) -> tuple[str | None, dict | None]:
+            """Recover HTML and refined pptx layout reliably from relay/model output."""
             def _strip_fences(text: str) -> str:
                 text = text.strip()
                 if text.startswith("```"):
@@ -1792,16 +1800,31 @@ with tab_convert:
                         pass
                 return _strip_fences(text)
 
+            _layout = None
             _body = raw_text or ""
-            if "---HTML---" in _body:
+            if "---PPTX_LAYOUT---" in _body:
+                _, _, _body = _body.partition("---PPTX_LAYOUT---")
+                if "---HTML---" in _body:
+                    _layout_text, _, _body = _body.partition("---HTML---")
+                    _layout_text = _decode_wrapped_text(_layout_text)
+                    try:
+                        _layout = json.loads(_layout_text)
+                    except Exception:
+                        _m = re.search(r"\{[\s\S]*\}", _layout_text)
+                        if _m:
+                            try:
+                                _layout = json.loads(_m.group(0))
+                            except Exception:
+                                _layout = None
+            elif "---HTML---" in _body:
                 _, _, _body = _body.partition("---HTML---")
             _body = _decode_wrapped_text(_body)
             if "<" in _body:
-                return _body[_body.index("<"):].strip()
+                return _body[_body.index("<"):].strip(), _layout
             _match = re.search(r"(<div\b[\s\S]*</div>)", _body, re.IGNORECASE)
             if _match:
-                return _match.group(1).strip()
-            return None
+                return _match.group(1).strip(), _layout
+            return None, _layout
 
         def _vit_regions_to_pptx(slide_png_bytes: bytes, region_spec: dict | None) -> bytes | None:
             """Build a simple single-slide PPTX from structured regions."""
@@ -1888,7 +1911,7 @@ with tab_convert:
             prs = _Presentation(str(_template)) if _template.exists() else _Presentation()
             prs.slide_width = _Emu(12192000)
             prs.slide_height = _Emu(6858000)
-            _layout_name = _choose_layout_name(_regions)
+            _layout_name = str(region_spec.get("layout_name") or _choose_layout_name(_regions))
             slide = prs.slides.add_slide(_find_layout(prs, _layout_name))
 
             _img = _Img.open(io.BytesIO(slide_png_bytes)).convert("RGB")
@@ -2108,6 +2131,7 @@ with tab_convert:
                             _v_regions = _vit_extract_regions(_v_regions_raw)
                             _v_html_raw = ""
                             _v_html = None
+                            _v_refined_layout = None
                             if _v_regions:
                                 _v_html_prompt = _VIT_HTML_PROMPT_TMPL.replace(
                                     "{region_json}",
@@ -2118,8 +2142,8 @@ with tab_convert:
                                     _v_png_bytes,
                                     image_name=f"slide_{_vi + 1}.png",
                                 )
-                                _v_html = _vit_extract_html(_v_html_raw)
-                            _v_pptx = _vit_regions_to_pptx(_v_png_bytes, _v_regions)
+                                _v_html, _v_refined_layout = _vit_extract_html_and_layout(_v_html_raw)
+                            _v_pptx = _vit_regions_to_pptx(_v_png_bytes, _v_refined_layout or _v_regions)
                             if not _v_html:
                                 print(
                                     f"[VIT] Slide {_vi + 1}: could not extract HTML from response",
@@ -2130,6 +2154,7 @@ with tab_convert:
                         except Exception as _v_ae:
                             _v_html = None
                             _v_regions = None
+                            _v_refined_layout = None
                             _v_pptx = None
                             _v_raw = ""
                             _v_err  = (
@@ -2197,6 +2222,14 @@ with tab_convert:
                                                 mime="application/json",
                                                 key=f"vit_regions_{_vi}",
                                             )
+                                        if _v_refined_layout:
+                                            st.download_button(
+                                                label=f"⬇ slide_{_vi + 1:02d}_pptx_layout.json",
+                                                data=json.dumps(_v_refined_layout, indent=2).encode("utf-8"),
+                                                file_name=f"slide_{_vi + 1:02d}_pptx_layout.json",
+                                                mime="application/json",
+                                                key=f"vit_layout_{_vi}",
+                                            )
                                         if _v_pptx:
                                             st.download_button(
                                                 label=f"⬇ slide_{_vi + 1:02d}.pptx",
@@ -2210,6 +2243,9 @@ with tab_convert:
                                         if _v_regions:
                                             with st.expander("Structured regions", expanded=False):
                                                 st.json(_v_regions)
+                                        if _v_refined_layout:
+                                            with st.expander("Refined PPTX layout", expanded=False):
+                                                st.json(_v_refined_layout)
                                     elif _v_raw:
                                         st.warning("Model returned content, but it was not valid raw HTML.")
                                         with st.expander("Raw response", expanded=True):
