@@ -2732,6 +2732,12 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         spTree.insert(2 if injected_subtitle else (1 if injected_title else 0), dt_sp)
         injected_date = True
 
+    # On token-only layouts, once the canonical title/subtitle/date placeholders
+    # are injected, the legacy source canvas should be stripped so old divider/
+    # cover artwork cannot sit on top of the master-driven layout.
+    if injected_title and is_token_only_layout:
+        _strip_all_decorative(spTree)
+
     return injected_title, injected_subtitle, injected_date
 
 
