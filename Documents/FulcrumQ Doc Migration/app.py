@@ -2235,18 +2235,28 @@ with tab_convert:
                             _v_html_raw = ""
                             _v_html = None
                             _v_refined_layout = None
+                            _v_err = None
                             if _v_regions:
                                 _vit_status.info(f"⏳ Slide {_vi + 1} of {_vit_n}: regions received, rendering HTML/layout…")
                                 _v_html_prompt = _VIT_HTML_PROMPT_TMPL.replace(
                                     "{region_json}",
                                     json.dumps(_v_regions, indent=2),
                                 )
-                                _v_html_raw = _vit_call_agent(
-                                    _v_html_prompt,
-                                    _v_png_bytes,
-                                    image_name=f"slide_{_vi + 1}.png",
-                                )
-                                _v_html, _v_refined_layout = _vit_extract_html_and_layout(_v_html_raw)
+                                try:
+                                    _v_html_raw = _vit_call_agent(
+                                        _v_html_prompt,
+                                        _v_png_bytes,
+                                        image_name=f"slide_{_vi + 1}.png",
+                                    )
+                                    _v_html, _v_refined_layout = _vit_extract_html_and_layout(_v_html_raw)
+                                except Exception as _v_html_e:
+                                    _v_html = None
+                                    _v_refined_layout = None
+                                    _v_html_raw = str(_v_html_e)
+                                    _v_err = (
+                                        "timeout" if "timeout" in str(_v_html_e).lower()
+                                        else f"HTML/layout step failed: {_v_html_e}"
+                                    )
                             _vit_status.info(f"⏳ Slide {_vi + 1} of {_vit_n}: building PPTX preview artifacts…")
                             _v_pptx = _vit_regions_to_pptx(_v_png_bytes, _v_refined_layout or _v_regions)
                             if not _v_html:
@@ -2255,7 +2265,6 @@ with tab_convert:
                                     flush=True,
                                 )
                             _v_raw = _v_html_raw or _v_regions_raw
-                            _v_err  = None
                         except Exception as _v_ae:
                             _v_html = None
                             _v_regions = None
@@ -2375,6 +2384,35 @@ with tab_convert:
                             if _v_refined_layout:
                                 with st.expander("Refined PPTX layout", expanded=False):
                                     st.json(_v_refined_layout)
+                        elif _v_regions or _v_pptx:
+                            st.warning(
+                                "HTML preview was not available, but partial artifacts were recovered."
+                                if not _v_err else (
+                                    "⏱ HTML/layout step timed out, but regions and PPTX were still recovered."
+                                    if _v_err == "timeout" else _v_err
+                                )
+                            )
+                            if _v_regions:
+                                st.download_button(
+                                    label=f"⬇ slide_{_slide_num:02d}_regions.json",
+                                    data=json.dumps(_v_regions, indent=2).encode("utf-8"),
+                                    file_name=f"slide_{_slide_num:02d}_regions.json",
+                                    mime="application/json",
+                                    key=f"vit_regions_partial_{_idx}",
+                                )
+                            if _v_pptx:
+                                st.download_button(
+                                    label=f"⬇ slide_{_slide_num:02d}.pptx",
+                                    data=_v_pptx,
+                                    file_name=f"slide_{_slide_num:02d}.pptx",
+                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                    key=f"vit_pptx_partial_{_idx}",
+                                )
+                            with st.expander("Raw response", expanded=False):
+                                st.code(_v_raw[:12000] or "(empty)", language="text")
+                            if _v_regions:
+                                with st.expander("Structured regions", expanded=False):
+                                    st.json(_v_regions)
                         elif _v_raw:
                             st.warning("Model returned content, but it was not valid raw HTML.")
                             with st.expander("Raw response", expanded=True):
