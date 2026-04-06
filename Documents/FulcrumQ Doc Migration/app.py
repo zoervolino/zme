@@ -1812,12 +1812,66 @@ with tab_convert:
                 return None
             try:
                 from pptx import Presentation as _Presentation
+                from pptx.enum.text import MSO_ANCHOR as _MSO_ANCHOR, PP_ALIGN as _PP_ALIGN
                 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE as _MSO_SHAPE
+                from pptx.enum.shapes import PP_PLACEHOLDER as _PP_PLACEHOLDER
                 from pptx.util import Emu as _Emu, Pt as _Pt
                 from pptx.dml.color import RGBColor as _RGB
                 from PIL import Image as _Img
             except Exception:
                 return None
+
+            def _noneish(val) -> bool:
+                return str(val or "").strip().lower() in {"", "none", "transparent", "null"}
+
+            def _region_area(r: dict) -> float:
+                try:
+                    return max(0.0, float(r.get("w", 0) or 0)) * max(0.0, float(r.get("h", 0) or 0))
+                except Exception:
+                    return 0.0
+
+            def _normalize_regions(regions: list[dict]) -> list[dict]:
+                _out = [r for r in regions if isinstance(r, dict)]
+                if len(_out) > 1:
+                    _canvas_area = 1280 * 720
+                    _out = [
+                        r for r in _out
+                        if not (
+                            bool(r.get("preserve_as_image"))
+                            and _region_area(r) >= _canvas_area * 0.85
+                        )
+                    ] or _out
+                # Draw image/background regions first, then native regions on top.
+                _out.sort(key=lambda r: (0 if bool(r.get("preserve_as_image")) else 1, _region_area(r)))
+                return _out
+
+            def _choose_layout_name(regions: list[dict]) -> str:
+                _kinds = {str(r.get("kind", "")) for r in regions if isinstance(r, dict)}
+                _has_title = "title" in _kinds
+                _has_banner = "banner" in _kinds
+                _has_footer_strip = "footer_strip" in _kinds
+                _image_heavy = sum(1 for r in regions if isinstance(r, dict) and bool(r.get("preserve_as_image"))) >= 1
+                if _has_title and (_has_banner or _has_footer_strip or _image_heavy):
+                    return "Content_Light"
+                if _has_title:
+                    return "Title_Only_Light"
+                return "Blank_Light"
+
+            def _find_layout(prs, layout_name: str):
+                for _layout in prs.slide_layouts:
+                    if _layout.name == layout_name:
+                        return _layout
+                return prs.slide_layouts[0]
+
+            def _set_title_placeholder(slide, text: str) -> bool:
+                for _ph in slide.placeholders:
+                    try:
+                        if _ph.placeholder_format.type == _PP_PLACEHOLDER.TITLE:
+                            _ph.text = text
+                            return True
+                    except Exception:
+                        continue
+                return False
 
             def _px_to_emu(val: float | int, axis: str) -> int:
                 _canvas = 1280 if axis == "x" else 720
@@ -1830,16 +1884,16 @@ with tab_convert:
                     _h = default.lstrip("#")
                 return int(_h[0:2], 16), int(_h[2:4], 16), int(_h[4:6], 16)
 
-            prs = _Presentation()
+            _template = BASE_DIR / "FulcrumQ Default Template.pptx"
+            prs = _Presentation(str(_template)) if _template.exists() else _Presentation()
             prs.slide_width = _Emu(12192000)
             prs.slide_height = _Emu(6858000)
-            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            _layout_name = _choose_layout_name(_regions)
+            slide = prs.slides.add_slide(_find_layout(prs, _layout_name))
 
             _img = _Img.open(io.BytesIO(slide_png_bytes)).convert("RGB")
 
-            for _region in _regions:
-                if not isinstance(_region, dict):
-                    continue
+            for _region in _normalize_regions(_regions):
                 x = _px_to_emu(_region.get("x", 0), "x")
                 y = _px_to_emu(_region.get("y", 0), "y")
                 w = max(_px_to_emu(_region.get("w", 0), "x"), _Emu(45720))
@@ -1852,6 +1906,9 @@ with tab_convert:
                 font_size = _region.get("font_size", 18)
                 font_weight = int(_region.get("font_weight", 400) or 400)
                 preserve_as_image = bool(_region.get("preserve_as_image"))
+
+                if kind == "title" and text and _set_title_placeholder(slide, text):
+                    continue
 
                 if preserve_as_image:
                     _crop = _img.crop((
@@ -1867,13 +1924,13 @@ with tab_convert:
                     continue
 
                 _shape = slide.shapes.add_shape(_MSO_SHAPE.RECTANGLE, x, y, w, h)
-                if bg:
+                if not _noneish(bg):
                     _r, _g, _b = _hex_rgb(bg, "#FFFFFF")
                     _shape.fill.solid()
                     _shape.fill.fore_color.rgb = _RGB(_r, _g, _b)
                 else:
                     _shape.fill.background()
-                if border:
+                if not _noneish(border):
                     _r, _g, _b = _hex_rgb(border, "#D0D7DF")
                     _shape.line.color.rgb = _RGB(_r, _g, _b)
                 else:
@@ -1882,18 +1939,33 @@ with tab_convert:
                 if text:
                     _tf = _shape.text_frame
                     _tf.clear()
-                    _p = _tf.paragraphs[0]
-                    _run = _p.add_run()
-                    _run.text = text
-                    _font = _run.font
-                    _font.name = "Segoe UI" if kind in {"title", "stat"} else "Arial"
-                    try:
-                        _font.size = _Pt(max(8, min(40, float(font_size))))
-                    except Exception:
-                        _font.size = _Pt(18)
-                    _font.bold = font_weight >= 600 or kind in {"title", "stat"}
-                    _r, _g, _b = _hex_rgb(fg, "#1D1D1D")
-                    _font.color.rgb = _RGB(_r, _g, _b)
+                    _tf.word_wrap = True
+                    _tf.vertical_anchor = _MSO_ANCHOR.MIDDLE
+                    _tf.margin_left = _Emu(45720)
+                    _tf.margin_right = _Emu(45720)
+                    _tf.margin_top = _Emu(22860)
+                    _tf.margin_bottom = _Emu(22860)
+
+                    _segments = [text]
+                    if kind in {"process", "banner", "footer_strip", "text"} and "|" in text:
+                        _segments = [s.strip() for s in text.split("|") if s.strip()]
+
+                    _first = True
+                    for _seg in _segments:
+                        _p = _tf.paragraphs[0] if _first else _tf.add_paragraph()
+                        _first = False
+                        _p.alignment = _PP_ALIGN.CENTER if kind in {"title", "stat", "footer_strip", "process"} else _PP_ALIGN.LEFT
+                        _run = _p.add_run()
+                        _run.text = _seg
+                        _font = _run.font
+                        _font.name = "Segoe UI" if kind in {"title", "stat"} else "Arial"
+                        try:
+                            _font.size = _Pt(max(8, min(40, float(font_size))))
+                        except Exception:
+                            _font.size = _Pt(18)
+                        _font.bold = font_weight >= 600 or kind in {"title", "stat"}
+                        _r, _g, _b = _hex_rgb(fg, "#1D1D1D")
+                        _font.color.rgb = _RGB(_r, _g, _b)
 
             _out = io.BytesIO()
             prs.save(_out)
