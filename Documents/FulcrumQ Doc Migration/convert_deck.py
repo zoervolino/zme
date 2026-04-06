@@ -2633,6 +2633,39 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
             if smallish and sp not in to_remove:
                 to_remove.append(sp)
 
+    # Remove legacy header-band placeholders that still carry the old combined
+    # title/subtitle stack (often body idx=10 on source masters). Once the
+    # canonical title/subtitle placeholders exist, these should not survive.
+    combined_norm = _normalize_text_for_match(" ".join(
+        part for part in (title_text or "", subtitle_text or "") if part
+    ))
+    title_only_norm = _normalize_text_for_match(title_text or "")
+    subtitle_only_norm = _normalize_text_for_match(subtitle_text or "")
+    for sp in spTree.findall(f"{{{NS_P}}}sp"):
+        if sp in to_remove:
+            continue
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is None:
+            continue
+        ph_type = ph.get("type", "")
+        ph_idx = ph.get("idx", "")
+        if ph_type in {"title", "ctrTitle", "subTitle", "dt", "ftr", "sldNum"}:
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        _, y, _, cy = bbox
+        if y > int(0.20 * 6_858_000) or cy > int(0.16 * 6_858_000):
+            continue
+        shape_norm = _normalize_text_for_match(_shape_text_value(sp))
+        if not shape_norm:
+            continue
+        contains_title = title_only_norm and title_only_norm in shape_norm
+        contains_subtitle = subtitle_only_norm and subtitle_only_norm in shape_norm
+        contains_combined = combined_norm and (combined_norm in shape_norm or shape_norm in combined_norm)
+        if contains_combined or (contains_title and contains_subtitle):
+            to_remove.append(sp)
+
     if is_token_only_layout:
         # On token-only layouts, once title/subtitle/date have been accepted we
         # should not leave old source text objects in the header band. Preserve
