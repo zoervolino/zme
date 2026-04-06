@@ -2337,7 +2337,7 @@ def snap_subtitle_to_layout(slide_root, layout_bytes):
     return snapped
 
 
-def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_text=None):
+def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_text=None, layout_name=""):
     """
     Write agent-detected title and subtitle directly into the slide's native
     v7 layout placeholders.
@@ -2350,15 +2350,16 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
       5. Insert both at the front of spTree.
 
     style_slide() applies font, color, and sentence-casing in a later pass.
-    Returns (injected_title: bool, injected_subtitle: bool).
+    Returns (injected_title: bool, injected_subtitle: bool, injected_date: bool).
     """
     spTree = slide_root.find(f".//{{{NS_P}}}spTree")
     if spTree is None:
-        return False, False
+        return False, False, False
 
     # -- What subtitle slot does this layout expose? ---------------------------
     layout_root   = etree.fromstring(layout_bytes)
     layout_sub_ph = None   # (ph_type, ph_idx) of layout subtitle slot
+    layout_dt_ph  = None   # (ph_type, ph_idx) of layout date slot
     for lsp in layout_root.iter(f"{{{NS_P}}}sp"):
         ph = lsp.find(f".//{{{NS_P}}}ph")
         if ph is None:
@@ -2367,7 +2368,61 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         pi = ph.get("idx",  "0")
         if pt == "subTitle" or (pt == "body" and pi in ("1", "12")):
             layout_sub_ph = (pt, pi)
-            break
+        if pt == "dt":
+            layout_dt_ph = (pt, pi)
+
+    def _shape_text_value(sp):
+        txBody = sp.find(f"{{{NS_P}}}txBody")
+        if txBody is None:
+            return ""
+        return "".join(t.text or "" for t in txBody.iter(f"{{{NS_A}}}t")).strip()
+
+    _date_patterns = [
+        r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{4}\b",
+        r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},\s+\d{4}\b",
+        r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+        r"\bq[1-4]\s+\d{4}\b",
+        r"\bfy\d{2,4}\b",
+        r"\b\d{4}\b",
+    ]
+
+    def _looks_like_date(text):
+        t = (text or "").strip()
+        if not t or len(t) > 40:
+            return False
+        tl = t.lower()
+        return any(re.search(pat, tl, re.IGNORECASE) for pat in _date_patterns)
+
+    def _extract_cover_date_candidate():
+        best = None
+        best_score = -1
+        for sp in spTree.findall(f"{{{NS_P}}}sp"):
+            ph = sp.find(f".//{{{NS_P}}}ph")
+            if ph is not None and ph.get("type", "") in ("title", "ctrTitle", "subTitle", "sldNum", "dt", "ftr"):
+                continue
+            txt = _shape_text_value(sp)
+            if not _looks_like_date(txt):
+                continue
+            bbox = _shape_bbox(sp)
+            if bbox is None:
+                continue
+            x, y, cx, cy = bbox
+            score = 0
+            if y < int(0.30 * 6_858_000):
+                score += 2
+            if y > int(0.70 * 6_858_000):
+                score += 1
+            if cx < int(0.45 * 12_192_000):
+                score += 1
+            if score > best_score:
+                best = (txt, sp)
+                best_score = score
+        return best
+
+    is_cover_layout = str(layout_name or "").startswith("Cover")
+    date_candidate = _extract_cover_date_candidate() if is_cover_layout and layout_dt_ph else None
+    date_text = date_candidate[0] if date_candidate else None
+    date_sp   = date_candidate[1] if date_candidate else None
 
     # -- Remove old title/subtitle shapes from the slide ----------------------
     title_norm = (title_text    or "").strip().lower()
@@ -2389,7 +2444,7 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
                 shape_text = "".join(
                     t.text or "" for t in txBody.iter(f"{{{NS_A}}}t")
                 ).strip().lower()
-                if shape_text and shape_text in (title_norm, sub_norm):
+                if shape_text and shape_text in (title_norm, sub_norm, (date_text or "").strip().lower()):
                     to_remove.append(sp)
 
     # Remove top-of-slide source title fragments even when they are split across
@@ -2408,6 +2463,27 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
             _, _, cx, cy = bbox
             smallish = cx <= int(0.60 * 12_192_000) and cy <= int(0.16 * 6_858_000)
             if smallish and sp not in to_remove:
+                to_remove.append(sp)
+
+    if is_cover_layout and not subtitle_text:
+        # On cover slides with no subtitle, aggressively strip stray short
+        # top-band text boxes; keep a detected date candidate for dt injection.
+        for sp in list(spTree.findall(f"{{{NS_P}}}sp")):
+            if sp in to_remove or sp is date_sp:
+                continue
+            ph = sp.find(f".//{{{NS_P}}}ph")
+            if ph is not None and ph.get("type", "") in ("title", "ctrTitle", "subTitle", "dt", "ftr", "sldNum"):
+                continue
+            txt = _shape_text_value(sp)
+            if not txt or len(txt) > 120:
+                continue
+            bbox = _shape_bbox(sp)
+            if bbox is None:
+                continue
+            x, y, cx, cy = bbox
+            near_title_band = y < int(0.26 * 6_858_000)
+            compact = cy < int(0.10 * 6_858_000)
+            if near_title_band and compact:
                 to_remove.append(sp)
 
     for sp in to_remove:
@@ -2452,6 +2528,7 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
     # -- Inject title ---------------------------------------------------------
     injected_title    = False
     injected_subtitle = False
+    injected_date     = False
 
     if title_text:
         title_sp = _make_ph_sp("title", None, title_text, max_id + 1, "Title 1")
@@ -2472,7 +2549,19 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         spTree.insert(1 if injected_title else 0, sub_sp)
         injected_subtitle = True
 
-    return injected_title, injected_subtitle
+    if date_text and layout_dt_ph:
+        dt_type, dt_idx = layout_dt_ph
+        dt_sp = _make_ph_sp(
+            "dt",
+            dt_idx if dt_idx not in ("0", None) else None,
+            date_text,
+            max_id + 2,
+            "Date Placeholder",
+        )
+        spTree.insert(2 if injected_subtitle else (1 if injected_title else 0), dt_sp)
+        injected_date = True
+
+    return injected_title, injected_subtitle, injected_date
 
 
 NS_R_IMG = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
@@ -5103,13 +5192,15 @@ def convert(source_path: Path, forced_layouts: dict = None):
                     remap_slide_layout(file_map, spath, v7_layout)
                     print(f"         subtitle : '{_agent_subtitle[:40]}' | layout → {sub_layout_name}")
 
-            inj_t, inj_s = inject_agent_title_subtitle(
-                slide_root, file_map[v7_layout], _agent_title, _agent_subtitle
+            inj_t, inj_s, inj_d = inject_agent_title_subtitle(
+                slide_root, file_map[v7_layout], _agent_title, _agent_subtitle, layout_name=v7_layout_name
             )
             if inj_t:
                 print(f"         injected : title='{_agent_title[:55]}'")
             if inj_s:
                 print(f"                    subtitle='{_agent_subtitle[:50]}'")
+            if inj_d:
+                print(f"                    date placeholder populated")
         else:
             # Fallback: agent unavailable — use XML heuristics
             n_lifted = lift_text_into_placeholders(slide_root, v7_layout_name, title_hint=_agent_hint)
