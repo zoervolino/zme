@@ -5061,7 +5061,7 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
 
     max_canonical_len = max((len(item["text"]) for item in canonical), default=80)
     removed = 0
-    for sp in list(spTree.findall(f"{{{NS_P}}}sp")):
+    for sp in list(slide_root.iter(f"{{{NS_P}}}sp")):
         ph = sp.find(f".//{{{NS_P}}}ph")
         if ph is not None and ph.get("type", "") in {"title", "ctrTitle", "subTitle", "dt", "ftr", "sldNum"}:
             continue
@@ -5102,8 +5102,10 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
         if not matched:
             continue
 
-        spTree.remove(sp)
-        removed += 1
+        parent = sp.getparent()
+        if parent is not None:
+            parent.remove(sp)
+            removed += 1
 
     return removed
 
