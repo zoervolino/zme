@@ -1591,12 +1591,7 @@ with tab_convert:
             "Slide type: {slide_type} (cover | content | divider | ending — use \"content\" if unknown)\n\n"
             "Cleaned slide XML:\n"
             "{cleaned_xml}\n\n"
-            "Before the HTML, output a content audit starting with ---AUDIT--- and ending with ---REGIONS---. The audit should list:\n"
-            "- Every content region you identified in the XML\n"
-            "- The approximate bounding box / footprint of each region based on the XML geometry\n"
-            "- For each region: what you found, what you rendered, and if you simplified or omitted anything — explain exactly why (e.g. 'text was too small to read', 'diagram was too complex to reconstruct accurately', 'could not determine exact values')\n"
-            "- Any content you could see but could not reproduce in HTML\n\n"
-            "Then output ---REGIONS--- followed by a valid JSON object with this schema:\n"
+            "Output ---REGIONS--- followed by a valid JSON object with this schema:\n"
             "{\n"
             '  "canvas": {"width": 1280, "height": 720},\n'
             '  "regions": [\n'
@@ -1616,7 +1611,7 @@ with tab_convert:
             "- Regions must describe the major slide structure, not every tiny word\n"
             "- Mark screenshot-heavy or image-heavy regions with preserve_as_image=true\n"
             "- The region list should be sufficient to recreate the slide in native PPTX objects and placed images\n\n"
-            "Then after ---HTML--- output the HTML div as normal. Start your response with ---AUDIT---.\n"
+            "Then after ---HTML--- output the HTML div as normal. Start your response with ---REGIONS---.\n"
             "CRITICAL OUTPUT FORMAT RULES:\n"
             "- After ---REGIONS---, output valid JSON only\n"
             "- After ---HTML---, output raw HTML markup only\n"
@@ -1687,8 +1682,8 @@ with tab_convert:
         _VIT_RELAY_URL  = "https://anyquest-webhook-relay-production-863f.up.railway.app"
         _VIT_AGENT_SLUG = "prompt-executor-qchksn"
 
-        def _vit_extract_response(raw_text: str) -> tuple[str | None, str | None, dict | None]:
-            """Recover audit, region JSON, and HTML reliably from relay/model output."""
+        def _vit_extract_response(raw_text: str) -> tuple[str | None, dict | None]:
+            """Recover region JSON and HTML reliably from relay/model output."""
             def _strip_fences(text: str) -> str:
                 text = text.strip()
                 if text.startswith("```"):
@@ -1728,12 +1723,10 @@ with tab_convert:
                         pass
                 return _strip_fences(text)
 
-            _audit = None
             _regions = None
             _body = raw_text or ""
             if "---REGIONS---" in _body:
-                _audit, _, _body = _body.partition("---REGIONS---")
-                _audit = _audit.replace("---AUDIT---", "").strip() or None
+                _, _, _body = _body.partition("---REGIONS---")
                 if "---HTML---" in _body:
                     _regions_text, _, _body = _body.partition("---HTML---")
                     _regions_text = _decode_wrapped_text(_regions_text)
@@ -1748,21 +1741,20 @@ with tab_convert:
                                 _regions = None
                 else:
                     _body = _decode_wrapped_text(_body)
-                    return None, _audit, _regions
+                    return None, _regions
             elif "---HTML---" in _body:
-                _audit, _, _body = _body.partition("---HTML---")
-                _audit = _audit.replace("---AUDIT---", "").strip() or None
+                _, _, _body = _body.partition("---HTML---")
             _body = _decode_wrapped_text(_body)
 
             if "<" in _body:
                 _body = _body[_body.index("<"):].strip()
-                return _body, _audit, _regions
+                return _body, _regions
 
             _match = re.search(r"(<div\b[\s\S]*</div>)", _body, re.IGNORECASE)
             if _match:
-                return _match.group(1).strip(), _audit, _regions
+                return _match.group(1).strip(), _regions
 
-            return None, _audit, _regions
+            return None, _regions
 
         def _vit_regions_to_pptx(slide_png_bytes: bytes, region_spec: dict | None) -> bytes | None:
             """Build a simple single-slide PPTX from structured regions."""
@@ -1903,7 +1895,8 @@ with tab_convert:
             _request_id = _result["requestId"]
 
             # Poll for result
-            _deadline    = _time.time() + 180
+            _timeout_s   = 360
+            _deadline    = _time.time() + _timeout_s
             _last_status = None
             while _time.time() < _deadline:
                 _poll   = _req.get(f"{_VIT_RELAY_URL}/result/{_request_id}", timeout=10)
@@ -1911,7 +1904,7 @@ with tab_convert:
                 _status = _data.get("status", "unknown")
                 if _status != _last_status:
                     print(
-                        f"[VIT] poll status={_status!r} t={int(120 - (_deadline - _time.time()))}s",
+                        f"[VIT] poll status={_status!r} t={int(_timeout_s - (_deadline - _time.time()))}s",
                         flush=True,
                     )
                     _last_status = _status
@@ -1926,7 +1919,7 @@ with tab_convert:
                     raise Exception(f"AgentRelay job {_status}: {_data}")
                 _time.sleep(3)
 
-            raise TimeoutError("AgentRelay: no result after 120s")
+            raise TimeoutError(f"AgentRelay: no result after {_timeout_s}s")
 
         # ── UI ────────────────────────────────────────────────────────────────
         st.caption(
@@ -1993,13 +1986,8 @@ with tab_convert:
                                 _v_png_bytes,
                                 image_name=f"slide_{_vi + 1}.png",
                             )
-                            _v_html, _v_audit, _v_regions = _vit_extract_response(_v_raw)
+                            _v_html, _v_regions = _vit_extract_response(_v_raw)
                             _v_pptx = _vit_regions_to_pptx(_v_png_bytes, _v_regions)
-                            if _v_audit:
-                                print(
-                                    f"\n[VIT] Slide {_vi + 1} audit:\n{_v_audit}\n",
-                                    flush=True,
-                                )
                             if not _v_html:
                                 print(
                                     f"[VIT] Slide {_vi + 1}: could not extract HTML from response",
