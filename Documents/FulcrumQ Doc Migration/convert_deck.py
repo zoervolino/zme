@@ -1010,6 +1010,110 @@ def _normalize_agent_detection(parsed: dict | None) -> dict | None:
     }
 
 
+def _extract_header_text_candidates(slide_root) -> list[dict]:
+    """Return lightweight header-region text candidates from the source slide."""
+    cands = []
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"dt", "ftr", "sldNum"}:
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        _, y, _, cy = bbox
+        if y > int(0.24 * 6_858_000) and (y + cy) > int(0.32 * 6_858_000):
+            continue
+        text = _shape_text(sp).strip()
+        if not text:
+            continue
+        words = text.split()
+        cands.append({
+            "sp": sp,
+            "text": text,
+            "norm": _normalize_text_for_match(text),
+            "font": _shape_font_size(sp),
+            "bbox": bbox,
+            "words": len(words),
+            "chars": len(text),
+        })
+    cands.sort(key=lambda item: (item["bbox"][1], -item["font"], item["bbox"][0]))
+    return cands
+
+
+def _normalize_agent_top_region(parsed: dict | None, slide_root) -> dict | None:
+    """Stabilize agent title/subtitle roles using deterministic header heuristics."""
+    det = _normalize_agent_detection(parsed)
+    if det is None or slide_root is None:
+        return det
+
+    header_cands = _extract_header_text_candidates(slide_root)
+    if not header_cands:
+        return det
+
+    label_re = re.compile(r"^(output|input|inputs|phase|step|section|chapter)\b(?:\s+\d+[a-z]?)?$", re.IGNORECASE)
+
+    def _is_short_label(c):
+        txt = c["text"].strip()
+        return (
+            c["chars"] <= 40
+            and c["words"] <= 5
+            and (
+                label_re.fullmatch(txt) is not None
+                or (txt == txt.upper() and any(ch.isalpha() for ch in txt))
+            )
+        )
+
+    short_labels = [c for c in header_cands if _is_short_label(c)]
+    if short_labels:
+        label = short_labels[0]
+        lx, ly, lcx, lcy = label["bbox"]
+        heading = None
+        for cand in header_cands:
+            if cand is label:
+                continue
+            _, cy, _, _ = cand["bbox"]
+            if cand["bbox"][1] < ly:
+                continue
+            if cand["norm"] == label["norm"]:
+                continue
+            if cand["bbox"][1] > ly + int(0.12 * 6_858_000):
+                continue
+            if cand["font"] < max(label["font"] + 200, int(label["font"] * 1.15)):
+                continue
+            if cand["chars"] < 12:
+                continue
+            heading = cand
+            break
+
+        if heading is not None and label_re.fullmatch(label["text"].strip()):
+            det["title"] = label["text"].strip()
+            det["subtitle"] = heading["text"].strip()
+            det["subtitle_present"] = True
+            if not det.get("recommended_layout") or "sub" not in str(det.get("recommended_layout", "")).lower():
+                det["recommended_layout"] = "Content_Light_Sub"
+            return det
+
+    # Combined title returned by agent even though a discrete short label exists above.
+    if short_labels and not det.get("subtitle_present"):
+        label = short_labels[0]
+        if label_re.fullmatch(label["text"].strip()):
+            for cand in header_cands:
+                if cand is label:
+                    continue
+                if cand["norm"] == label["norm"]:
+                    continue
+                if cand["bbox"][1] < label["bbox"][1]:
+                    continue
+                if cand["chars"] >= 12 and cand["font"] >= max(label["font"] + 200, int(label["font"] * 1.15)):
+                    det["title"] = label["text"].strip()
+                    det["subtitle"] = cand["text"].strip()
+                    det["subtitle_present"] = True
+                    det["recommended_layout"] = "Content_Light_Sub"
+                    break
+
+    return det
+
+
 def _agent_detect_title(slide_image_path):
     """
     Sends a rasterized slide PNG to the vision-capable AnyQuest agent via file upload.
@@ -1045,6 +1149,9 @@ def _agent_detect_title(slide_image_path):
             '"confidence":0.0,"reason":"<one sentence>","color_semantics":[],'
             '"visual_schema":{"layout_pattern":"<very short pattern>","top_region":"<very short>","risk_flags":[]}}\n\n'
             "TITLE: the largest/boldest heading text near the top. Not bullets, not body, not footer.\n"
+            "If a short top label like OUTPUT 1/2/3, INPUTS, PHASE 1, or STEP 2 appears above a larger heading, "
+            "treat the short label as the title token and the larger line below as the subtitle only if it is a "
+            "true secondary heading.\n"
             "SUBTITLE_PRESENT: true only when there is a real supporting subtitle directly under the title.\n"
             "If there is no true subtitle, set subtitle_present=false and subtitle='N/A'.\n"
             "Do not use a banner paragraph, body intro, bullets, or footer text as the subtitle.\n"
@@ -2660,10 +2767,10 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         shape_norm = _normalize_text_for_match(_shape_text_value(sp))
         if not shape_norm:
             continue
-        contains_title = title_only_norm and title_only_norm in shape_norm
+        contains_title = title_only_norm and (title_only_norm in shape_norm or shape_norm in title_only_norm)
         contains_subtitle = subtitle_only_norm and subtitle_only_norm in shape_norm
         contains_combined = combined_norm and (combined_norm in shape_norm or shape_norm in combined_norm)
-        if contains_combined or (contains_title and contains_subtitle):
+        if contains_combined or (contains_title and contains_subtitle) or (contains_title and not subtitle_text):
             to_remove.append(sp)
 
     if is_token_only_layout:
@@ -5872,6 +5979,7 @@ def convert(source_path: Path, forced_layouts: dict = None):
             # Agent title/subtitle detection — runs before resolve_layout so subtitle
             # info can inform layout choice.
             _det        = _agent_detect_title(_slide_pngs[i - 1]) if _slide_pngs and i <= len(_slide_pngs) else None
+            _det        = _normalize_agent_top_region(_det, slide_root) if _det else None
             _agent_hint = None
             if _det:
                 _agent_hint = _det.get("title")
