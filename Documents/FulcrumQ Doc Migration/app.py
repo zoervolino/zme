@@ -1591,13 +1591,34 @@ with tab_convert:
             "Slide type: {slide_type} (cover | content | divider | ending — use \"content\" if unknown)\n\n"
             "Cleaned slide XML:\n"
             "{cleaned_xml}\n\n"
-            "Before the HTML, output a content audit starting with ---AUDIT--- and ending with ---HTML---. The audit should list:\n"
+            "Before the HTML, output a content audit starting with ---AUDIT--- and ending with ---REGIONS---. The audit should list:\n"
             "- Every content region you identified in the XML\n"
             "- The approximate bounding box / footprint of each region based on the XML geometry\n"
             "- For each region: what you found, what you rendered, and if you simplified or omitted anything — explain exactly why (e.g. 'text was too small to read', 'diagram was too complex to reconstruct accurately', 'could not determine exact values')\n"
             "- Any content you could see but could not reproduce in HTML\n\n"
+            "Then output ---REGIONS--- followed by a valid JSON object with this schema:\n"
+            "{\n"
+            '  "canvas": {"width": 1280, "height": 720},\n'
+            '  "regions": [\n'
+            "    {\n"
+            '      "id": "region_1",\n'
+            '      "kind": "title|text|banner|footer_strip|table|process|screenshot_panel|image_panel|stat|shape",\n'
+            '      "x": 0, "y": 0, "w": 100, "h": 50,\n'
+            '      "text": "visible text if applicable",\n'
+            '      "bg": "#FFFFFF", "fg": "#1D1D1D", "border": "#D0D7DF",\n'
+            '      "font_size": 28, "font_weight": 700,\n'
+            '      "preserve_as_image": false,\n'
+            '      "source_hint": "what source region this came from"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "- Use pixel coordinates in the 1280×720 canvas\n"
+            "- Regions must describe the major slide structure, not every tiny word\n"
+            "- Mark screenshot-heavy or image-heavy regions with preserve_as_image=true\n"
+            "- The region list should be sufficient to recreate the slide in native PPTX objects and placed images\n\n"
             "Then after ---HTML--- output the HTML div as normal. Start your response with ---AUDIT---.\n"
             "CRITICAL OUTPUT FORMAT RULES:\n"
+            "- After ---REGIONS---, output valid JSON only\n"
             "- After ---HTML---, output raw HTML markup only\n"
             "- Do not escape HTML characters like < or >\n"
             "- Do not wrap the HTML in quotes or JSON\n"
@@ -1666,8 +1687,8 @@ with tab_convert:
         _VIT_RELAY_URL  = "https://anyquest-webhook-relay-production-863f.up.railway.app"
         _VIT_AGENT_SLUG = "prompt-executor-qchksn"
 
-        def _vit_extract_html(raw_text: str) -> tuple[str | None, str | None]:
-            """Recover HTML reliably from relay/model output."""
+        def _vit_extract_response(raw_text: str) -> tuple[str | None, str | None, dict | None]:
+            """Recover audit, region JSON, and HTML reliably from relay/model output."""
             def _strip_fences(text: str) -> str:
                 text = text.strip()
                 if text.startswith("```"):
@@ -1708,21 +1729,136 @@ with tab_convert:
                 return _strip_fences(text)
 
             _audit = None
+            _regions = None
             _body = raw_text or ""
-            if "---HTML---" in _body:
+            if "---REGIONS---" in _body:
+                _audit, _, _body = _body.partition("---REGIONS---")
+                _audit = _audit.replace("---AUDIT---", "").strip() or None
+                if "---HTML---" in _body:
+                    _regions_text, _, _body = _body.partition("---HTML---")
+                    _regions_text = _decode_wrapped_text(_regions_text)
+                    try:
+                        _regions = json.loads(_regions_text)
+                    except Exception:
+                        _m = re.search(r"\{[\s\S]*\}", _regions_text)
+                        if _m:
+                            try:
+                                _regions = json.loads(_m.group(0))
+                            except Exception:
+                                _regions = None
+                else:
+                    _body = _decode_wrapped_text(_body)
+                    return None, _audit, _regions
+            elif "---HTML---" in _body:
                 _audit, _, _body = _body.partition("---HTML---")
                 _audit = _audit.replace("---AUDIT---", "").strip() or None
             _body = _decode_wrapped_text(_body)
 
             if "<" in _body:
                 _body = _body[_body.index("<"):].strip()
-                return _body, _audit
+                return _body, _audit, _regions
 
             _match = re.search(r"(<div\b[\s\S]*</div>)", _body, re.IGNORECASE)
             if _match:
-                return _match.group(1).strip(), _audit
+                return _match.group(1).strip(), _audit, _regions
 
-            return None, _audit
+            return None, _audit, _regions
+
+        def _vit_regions_to_pptx(slide_png_bytes: bytes, region_spec: dict | None) -> bytes | None:
+            """Build a simple single-slide PPTX from structured regions."""
+            if not isinstance(region_spec, dict):
+                return None
+            _regions = region_spec.get("regions")
+            if not isinstance(_regions, list) or not _regions:
+                return None
+            try:
+                from pptx import Presentation as _Presentation
+                from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE as _MSO_SHAPE
+                from pptx.util import Emu as _Emu, Pt as _Pt
+                from pptx.dml.color import RGBColor as _RGB
+                from PIL import Image as _Img
+            except Exception:
+                return None
+
+            def _px_to_emu(val: float | int, axis: str) -> int:
+                _canvas = 1280 if axis == "x" else 720
+                _size = prs.slide_width if axis == "x" else prs.slide_height
+                return int(max(0, float(val or 0)) / _canvas * _size)
+
+            def _hex_rgb(val: str | None, default: str) -> tuple[int, int, int]:
+                _h = (val or default).strip().lstrip("#")
+                if len(_h) != 6 or not re.fullmatch(r"[0-9A-Fa-f]{6}", _h):
+                    _h = default.lstrip("#")
+                return int(_h[0:2], 16), int(_h[2:4], 16), int(_h[4:6], 16)
+
+            prs = _Presentation()
+            prs.slide_width = _Emu(12192000)
+            prs.slide_height = _Emu(6858000)
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+            _img = _Img.open(io.BytesIO(slide_png_bytes)).convert("RGB")
+
+            for _region in _regions:
+                if not isinstance(_region, dict):
+                    continue
+                x = _px_to_emu(_region.get("x", 0), "x")
+                y = _px_to_emu(_region.get("y", 0), "y")
+                w = max(_px_to_emu(_region.get("w", 0), "x"), _Emu(45720))
+                h = max(_px_to_emu(_region.get("h", 0), "y"), _Emu(45720))
+                kind = str(_region.get("kind", "shape"))
+                text = str(_region.get("text", "") or "")
+                bg = _region.get("bg")
+                fg = _region.get("fg")
+                border = _region.get("border")
+                font_size = _region.get("font_size", 18)
+                font_weight = int(_region.get("font_weight", 400) or 400)
+                preserve_as_image = bool(_region.get("preserve_as_image"))
+
+                if preserve_as_image:
+                    _crop = _img.crop((
+                        max(0, int(_region.get("x", 0))),
+                        max(0, int(_region.get("y", 0))),
+                        min(_img.width, int((_region.get("x", 0) or 0) + (_region.get("w", 0) or 0))),
+                        min(_img.height, int((_region.get("y", 0) or 0) + (_region.get("h", 0) or 0))),
+                    ))
+                    _buf = io.BytesIO()
+                    _crop.save(_buf, format="PNG")
+                    _buf.seek(0)
+                    slide.shapes.add_picture(_buf, x, y, width=w, height=h)
+                    continue
+
+                _shape = slide.shapes.add_shape(_MSO_SHAPE.RECTANGLE, x, y, w, h)
+                if bg:
+                    _r, _g, _b = _hex_rgb(bg, "#FFFFFF")
+                    _shape.fill.solid()
+                    _shape.fill.fore_color.rgb = _RGB(_r, _g, _b)
+                else:
+                    _shape.fill.background()
+                if border:
+                    _r, _g, _b = _hex_rgb(border, "#D0D7DF")
+                    _shape.line.color.rgb = _RGB(_r, _g, _b)
+                else:
+                    _shape.line.fill.background()
+
+                if text:
+                    _tf = _shape.text_frame
+                    _tf.clear()
+                    _p = _tf.paragraphs[0]
+                    _run = _p.add_run()
+                    _run.text = text
+                    _font = _run.font
+                    _font.name = "Segoe UI" if kind in {"title", "stat"} else "Arial"
+                    try:
+                        _font.size = _Pt(max(8, min(40, float(font_size))))
+                    except Exception:
+                        _font.size = _Pt(18)
+                    _font.bold = font_weight >= 600 or kind in {"title", "stat"}
+                    _r, _g, _b = _hex_rgb(fg, "#1D1D1D")
+                    _font.color.rgb = _RGB(_r, _g, _b)
+
+            _out = io.BytesIO()
+            prs.save(_out)
+            return _out.getvalue()
 
         def _vit_call_agent(prompt_text, image_bytes, image_name="slide.png"):
             """
@@ -1857,7 +1993,8 @@ with tab_convert:
                                 _v_png_bytes,
                                 image_name=f"slide_{_vi + 1}.png",
                             )
-                            _v_html, _v_audit = _vit_extract_html(_v_raw)
+                            _v_html, _v_audit, _v_regions = _vit_extract_response(_v_raw)
+                            _v_pptx = _vit_regions_to_pptx(_v_png_bytes, _v_regions)
                             if _v_audit:
                                 print(
                                     f"\n[VIT] Slide {_vi + 1} audit:\n{_v_audit}\n",
@@ -1871,6 +2008,8 @@ with tab_convert:
                             _v_err  = None
                         except Exception as _v_ae:
                             _v_html = None
+                            _v_regions = None
+                            _v_pptx = None
                             _v_raw = ""
                             _v_err  = (
                                 "timeout" if "timeout" in str(_v_ae).lower()
@@ -1929,8 +2068,27 @@ with tab_convert:
                                             mime="text/html",
                                             key=f"vit_dl_{_vi}",
                                         )
+                                        if _v_regions:
+                                            st.download_button(
+                                                label=f"⬇ slide_{_vi + 1:02d}_regions.json",
+                                                data=json.dumps(_v_regions, indent=2).encode("utf-8"),
+                                                file_name=f"slide_{_vi + 1:02d}_regions.json",
+                                                mime="application/json",
+                                                key=f"vit_regions_{_vi}",
+                                            )
+                                        if _v_pptx:
+                                            st.download_button(
+                                                label=f"⬇ slide_{_vi + 1:02d}.pptx",
+                                                data=_v_pptx,
+                                                file_name=f"slide_{_vi + 1:02d}.pptx",
+                                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                                key=f"vit_pptx_{_vi}",
+                                            )
                                         with st.expander("Raw response", expanded=False):
                                             st.code(_v_raw[:12000] or "(empty)", language="text")
+                                        if _v_regions:
+                                            with st.expander("Structured regions", expanded=False):
+                                                st.json(_v_regions)
                                     elif _v_raw:
                                         st.warning("Model returned content, but it was not valid raw HTML.")
                                         with st.expander("Raw response", expanded=True):
