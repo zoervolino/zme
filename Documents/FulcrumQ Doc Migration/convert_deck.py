@@ -2485,7 +2485,9 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
                 best_score = score
         return best
 
-    is_cover_layout = str(layout_name or "").startswith("Cover")
+    layout_name = str(layout_name or "")
+    is_cover_layout = layout_name.startswith("Cover")
+    is_token_only_layout = is_cover_layout or ("Divider" in layout_name) or ("Ending" in layout_name)
     date_candidate = _extract_cover_date_candidate() if is_cover_layout and layout_dt_ph else None
     date_text = date_candidate[0] if date_candidate else None
     date_sp   = date_candidate[1] if date_candidate else None
@@ -2631,9 +2633,10 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
             if smallish and sp not in to_remove:
                 to_remove.append(sp)
 
-    if is_cover_layout and not subtitle_text:
-        # On cover slides with no subtitle, aggressively strip stray short
-        # top-band text boxes; keep a detected date candidate for dt injection.
+    if is_token_only_layout:
+        # On token-only layouts, once title/subtitle/date have been accepted we
+        # should not leave old source text objects in the header band. Preserve
+        # only real title/subtitle/footer placeholders and an extracted date.
         for sp in list(spTree.findall(f"{{{NS_P}}}sp")):
             if sp in to_remove or sp is date_sp:
                 continue
@@ -2641,14 +2644,14 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
             if ph is not None and ph.get("type", "") in ("title", "ctrTitle", "subTitle", "dt", "ftr", "sldNum"):
                 continue
             txt = _shape_text_value(sp)
-            if not txt or len(txt) > 120:
+            if not txt:
                 continue
             bbox = _shape_bbox(sp)
             if bbox is None:
                 continue
             x, y, cx, cy = bbox
             near_title_band = y < int(0.26 * 6_858_000)
-            compact = cy < int(0.10 * 6_858_000)
+            compact = cy < int(0.18 * 6_858_000)
             if near_title_band and compact:
                 to_remove.append(sp)
 
@@ -2985,8 +2988,9 @@ def lift_text_into_placeholders(slide_root, layout_name, title_hint=None):
          groups) so leftover shapes can't interfere with z-order color detection.
       4. Strip all explicit rPr colors from the title shape so master colors apply.
 
-    Divider/Ending strategy (conservative — only strip large filled blocks):
-      Same steps 1-2, then _strip_large_filled_shapes only.
+    Divider/Ending strategy:
+      Same token-lift behavior, then strip decorative source shapes so the
+      FulcrumQ divider/ending master fully owns the composition.
 
     Searches for text candidates inside grpSp children as well as top-level sp.
     Returns count of shapes promoted.
@@ -3074,7 +3078,7 @@ def lift_text_into_placeholders(slide_root, layout_name, title_hint=None):
     if title_sp is not None and _shape_text(title_sp):
         # Title already has content — wipe source formatting then clear canvas
         _wipe_placeholder_formatting(title_sp)
-        if IS_COVER:
+        if IS_COVER or IS_DIVIDER:
             _strip_all_decorative(spTree, keep=title_sp)
         else:
             _strip_large_filled_shapes(spTree, SLIDE_W, SLIDE_H, keep=title_sp)
@@ -3166,8 +3170,8 @@ def lift_text_into_placeholders(slide_root, layout_name, title_hint=None):
         promoted += 1
 
     # ── 5. Strip decorative shapes ────────────────────────────────────────────
-    if IS_COVER:
-        # Full canvas clear — master owns all visual styling on covers
+    if IS_COVER or IS_DIVIDER:
+        # Full canvas clear — master owns all visual styling on covers/dividers/endings
         _strip_all_decorative(spTree, keep=best)
     else:
         _strip_large_filled_shapes(spTree, SLIDE_W, SLIDE_H, keep=best)
@@ -3500,6 +3504,115 @@ def _is_corner_logo_candidate(pic, slide_w: int, slide_h: int) -> bool:
     return (top and (left or right)) or (bottom and left)
 
 
+def _is_ceoworks_logo_image(img_bytes: bytes, aspect: float) -> bool:
+    """Heuristic detector for legacy CEO Works logo images.
+
+    Detects two common patterns:
+      - wide `C + CEO•WORKS` wordmark
+      - square-ish red/orange `C` monogram
+    """
+    if not img_bytes:
+        return False
+    try:
+        from PIL import Image
+        import io as _io
+    except Exception:
+        return False
+
+    try:
+        img = Image.open(_io.BytesIO(img_bytes)).convert("RGBA")
+    except Exception:
+        return False
+
+    # Normalize to a small canvas for cheap color-stat heuristics.
+    img.thumbnail((180, 180))
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        return False
+    px = list(img.getdata())
+    opaque = [p for p in px if p[3] > 32]
+    if not opaque:
+        return False
+
+    def _is_whiteish(p):
+        return p[0] >= 235 and p[1] >= 235 and p[2] >= 235
+
+    def _is_redish(p):
+        return p[0] >= 150 and p[1] <= 120 and p[2] <= 120
+
+    def _is_orangeish(p):
+        return p[0] >= 180 and 80 <= p[1] <= 220 and p[2] <= 140
+
+    def _is_grayish(p):
+        mx = max(p[0], p[1], p[2]); mn = min(p[0], p[1], p[2])
+        return mx - mn <= 28 and 70 <= mx <= 210
+
+    red = sum(1 for p in opaque if _is_redish(p))
+    orange = sum(1 for p in opaque if _is_orangeish(p))
+    gray = sum(1 for p in opaque if _is_grayish(p))
+    white = sum(1 for p in opaque if _is_whiteish(p))
+    total = len(opaque)
+
+    red_frac = red / total
+    orange_frac = orange / total
+    gray_frac = gray / total
+    white_frac = white / total
+
+    # Spatial clue: full logo has red/orange concentrated on the left and gray on the right.
+    left_red = right_gray = 0
+    for yi in range(h):
+        for xi in range(w):
+            p = img.getpixel((xi, yi))
+            if p[3] <= 32:
+                continue
+            if xi < int(0.42 * w) and (_is_redish(p) or _is_orangeish(p)):
+                left_red += 1
+            if xi > int(0.38 * w) and _is_grayish(p):
+                right_gray += 1
+
+    if aspect >= 2.0:
+        return (
+            red_frac >= 0.03
+            and gray_frac >= 0.08
+            and white_frac >= 0.25
+            and left_red >= max(20, int(0.015 * w * h))
+            and right_gray >= max(30, int(0.025 * w * h))
+        )
+
+    if 0.55 <= aspect <= 1.45:
+        return (
+            (red_frac + orange_frac) >= 0.10
+            and white_frac >= 0.20
+            and gray_frac <= 0.20
+            and left_red >= max(20, int(0.02 * w * h))
+        )
+
+    return False
+
+
+def _is_logo_swap_candidate(pic, file_map, slide_path: str, slide_w: int, slide_h: int) -> bool:
+    """True when a picture should be replaced by an approved FulcrumQ logo asset."""
+    bbox = _pic_bbox(pic)
+    if bbox is None:
+        return False
+    _, _, cx, cy = bbox
+    aspect = cx / max(cy, 1)
+
+    if _is_corner_logo_candidate(pic, slide_w, slide_h):
+        return True
+
+    img_bytes = _pic_image_bytes(pic, file_map, slide_path)
+    if img_bytes and _image_has_face(img_bytes):
+        return False
+
+    slide_area = max(1, slide_w * slide_h)
+    area_frac = (cx * cy) / slide_area
+    if area_frac > 0.18:
+        return False
+
+    return _is_ceoworks_logo_image(img_bytes, aspect)
+
+
 def _select_logo_asset_key(pic, slide_root) -> str:
     """Choose the approved FulcrumQ logo variant for this picture slot."""
     bbox = _pic_bbox(pic) or (0, 0, 1, 1)
@@ -3541,7 +3654,7 @@ def _swap_corner_logos(slide_root, file_map, slide_path: str, slide_w: int, slid
 
     replaced = 0
     for pic in slide_root.iter(f"{{{NS_P}}}pic"):
-        if not _is_corner_logo_candidate(pic, slide_w, slide_h):
+        if not _is_logo_swap_candidate(pic, file_map, slide_path, slide_w, slide_h):
             continue
         rid = _pic_embed_rid(pic)
         if not rid:
@@ -4302,6 +4415,12 @@ def enforce_text_contrast(slide_root, rag_preserve: set) -> int:
             if under is not None:
                 want = "FFFFFF" if _bg_is_dark(under) else "1D1D1D"
                 n += _set_text_color_preserving_emphasis(sp, want, rag_preserve)
+            else:
+                slide_bg = _slide_bg_hex(slide_root)
+                want = "FFFFFF" if _bg_is_dark(slide_bg) else "1D1D1D"
+                has_text = any((t.text or "").strip() for t in sp.iter(f"{{{NS_A}}}t"))
+                if has_text:
+                    n += _set_text_color_preserving_emphasis(sp, want, rag_preserve)
 
     # ── Table cells (only when cell has explicit dark fill) ───────────────────
     slide_bg = _slide_bg_hex(slide_root)
@@ -4941,11 +5060,11 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
             continue
         overlap = _text_overlap_score(norm_txt, norm_title)
         contains = norm_title in norm_txt or norm_txt in norm_title
-        if overlap < 0.82 and not contains:
+        if overlap < 0.72 and not contains:
             continue
 
         candidate_font = _shape_font_size(sp)
-        if candidate_font and title_font and candidate_font >= title_font:
+        if candidate_font and title_font and candidate_font > int(title_font * 1.10):
             continue
 
         spTree.remove(sp)
