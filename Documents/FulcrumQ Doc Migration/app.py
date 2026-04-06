@@ -1527,20 +1527,25 @@ with tab_convert:
             "- All borders: 1px #D0D7DF\n\n"
             "═══════════════════════════════════════\n\n"
             "LAYOUT COMPOSITION RULES\n"
-            "Before writing any HTML, mentally divide the slide into zones based on what you see in the XML. Every content region must have a defined zone — nothing should float or overlap awkwardly. Apply these rules:\n"
-            "- Use CSS Grid or flexbox to create the layout — never use absolute positioning for content blocks\n"
+            "Before writing any HTML, mentally divide the slide into zones based on what you see in the XML and image. Every content region must have a defined zone. Preserve the original slide's composition, spacing relationships, and relative footprint before you optimize anything. Apply these rules:\n"
+            "- Fidelity comes first. Recreate the original layout as closely as possible before making it prettier or cleaner\n"
+            "- Use the XML x/y/cx/cy geometry to preserve the original region positions and sizes\n"
+            "- You may use absolute positioning for macro regions when needed to match the source layout more faithfully\n"
+            "- Use CSS Grid or flexbox inside a region once that region's overall footprint is correct\n"
             "- All content must fit within 1280×720px without overflow or scrolling — scale font sizes down if needed to make everything fit\n"
             "- Numbered sections (1, 2, 3 etc) must all be visible and consistently positioned — if you see 3 numbered items in the source, all 3 must appear in the output\n"
-            "- When a stat callout ($236M etc) sits next to a diagram, they must be in the same row as explicit siblings with defined widths — not stacked or floating\n"
-            "- Treat the layout like a grid: identify columns and rows first, then place content into them\n"
-            "- Leave breathing room between zones — padding minimum 16px between distinct content regions\n"
-            "- The overall composition should feel balanced — if the source has left content + right diagram, the HTML must mirror that split explicitly with a two-column layout\n\n"
+            "- When a stat callout ($236M etc) sits next to a diagram, preserve that same row and relative scale — do not stack or drift it away from its partner region\n"
+            "- Do not rebalance whitespace aggressively. If the source is dense, the output should also be dense\n"
+            "- Preserve banner bars, footer strips, framed screenshots, and wide horizontal bands at their original visual width and height relationships\n"
+            "- The overall composition should feel like the same slide, not a redesign. If the source has left content + center table + right screenshot, the HTML must preserve that 3-region split explicitly\n\n"
             "RENDERING RULES\n"
             "- Use only visible content from the image — do not invent content\n"
             "- Identify the correct semantic role of each element from VISUAL SIZE AND POSITION, not XML tag\n"
             "- The title is the largest or most visually prominent text on the slide, almost always in the top portion. Even if the XML tags it as a body placeholder, if it is visually the biggest text and positioned at the top, it is the title. Render it as an <h1> with font-family: 'Segoe UI', sans-serif; font-weight: bold; minimum font-size: 28px.\n"
             "- If the slide contains a screenshot of a table or chart, extract the data from it and render as a native HTML table or chart\n"
-            "- If the slide contains a diagram, flowchart, or process visual that cannot be reconstructed from text alone, do NOT use a placeholder. Instead render your best interpretation as native HTML and CSS — use divs, flexbox, borders, arrows (→ or CSS borders), and colored boxes to approximate the structure. It does not need to be pixel-perfect; it needs to convey the same information and visual logic. Only use a placeholder as an absolute last resort if the diagram is completely illegible from the XML.\n"
+            "- If the slide contains an embedded screenshot, screenshot-like panel, or image-heavy region, preserve it as a visually faithful framed region with the same footprint and hierarchy. Do not flatten it into a simplified semantic summary\n"
+            "- If a screenshot or diagram cannot be reconstructed exactly from text alone, recreate its frame, headers, key labels, internal sections, and major visual hierarchy so it still looks like the original screenshot region rather than a generic replacement\n"
+            "- If the slide contains a diagram, flowchart, or process visual that cannot be reconstructed from text alone, render your best faithful interpretation in native HTML and CSS — use borders, arrows, colored boxes, and nested regions to preserve the same visual logic and density\n"
             "- If the slide is too visually broken to salvage, set data-mode=\"redesign\" on the root div and rebuild from scratch using the correct layout template above\n"
             "- Otherwise set data-mode=\"correct\" on the root div\n"
             "- Preserve all visible text exactly as written — do not paraphrase or summarize\n"
@@ -1588,6 +1593,7 @@ with tab_convert:
             "{cleaned_xml}\n\n"
             "Before the HTML, output a content audit starting with ---AUDIT--- and ending with ---HTML---. The audit should list:\n"
             "- Every content region you identified in the XML\n"
+            "- The approximate bounding box / footprint of each region based on the XML geometry\n"
             "- For each region: what you found, what you rendered, and if you simplified or omitted anything — explain exactly why (e.g. 'text was too small to read', 'diagram was too complex to reconstruct accurately', 'could not determine exact values')\n"
             "- Any content you could see but could not reproduce in HTML\n\n"
             "Then after ---HTML--- output the HTML div as normal. Start your response with ---AUDIT---.\n"
@@ -1600,7 +1606,7 @@ with tab_convert:
         )
 
         def _vit_clean_xml(slide_bytes):
-            """Return a stripped structural XML: shape IDs, positions, text, ph types only."""
+            """Return stripped structural XML with geometry so the model can preserve layout."""
             from lxml import etree as _et
             _NS_P = "http://schemas.openxmlformats.org/presentationml/2006/main"
             _NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -1610,22 +1616,40 @@ with tab_convert:
                 if _spTree is None:
                     return "<slide/>"
                 _lines = ["<slide>"]
-                for _sp in _spTree.iter(f"{{{_NS_P}}}sp"):
+                for _node in _spTree:
+                    if not isinstance(_node.tag, str):
+                        continue
+                    _local = _node.tag.rsplit("}", 1)[-1]
+                    if _local not in {"sp", "pic", "graphicFrame"}:
+                        continue
                     _attrs = {}
-                    _cNvPr = _sp.find(f".//{{{_NS_P}}}cNvPr")
+                    _attrs["kind"] = _local
+                    _cNvPr = _node.find(f".//{{{_NS_P}}}cNvPr")
                     if _cNvPr is not None:
                         _attrs["id"] = _cNvPr.get("id", "")
-                    _ph = _sp.find(f".//{{{_NS_P}}}ph")
+                        if _cNvPr.get("name"):
+                            _attrs["name"] = _cNvPr.get("name", "")
+                    _ph = _node.find(f".//{{{_NS_P}}}ph")
                     if _ph is not None:
                         _attrs["ph"] = _ph.get("type", "body")
-                    _texts = [_t.text for _t in _sp.iter(f"{{{_NS_A}}}t")
+                    _xfrm = _node.find(f".//{{{_NS_A}}}xfrm")
+                    if _xfrm is not None:
+                        _off = _xfrm.find(f"./{{{_NS_A}}}off")
+                        _ext = _xfrm.find(f"./{{{_NS_A}}}ext")
+                        if _off is not None:
+                            _attrs["x"] = _off.get("x", "")
+                            _attrs["y"] = _off.get("y", "")
+                        if _ext is not None:
+                            _attrs["cx"] = _ext.get("cx", "")
+                            _attrs["cy"] = _ext.get("cy", "")
+                    _texts = [_t.text for _t in _node.iter(f"{{{_NS_A}}}t")
                               if _t.text and _t.text.strip()]
                     _attr_str = " ".join(f'{k}="{v}"' for k, v in _attrs.items())
                     _text_str = " ".join(_texts)
                     if _text_str:
-                        _lines.append(f"  <shape {_attr_str}>{_text_str}</shape>")
+                        _lines.append(f"  <node {_attr_str}>{_text_str}</node>")
                     else:
-                        _lines.append(f"  <shape {_attr_str}/>")
+                        _lines.append(f"  <node {_attr_str}/>")
                 _lines.append("</slide>")
                 return "\n".join(_lines)
             except Exception:
