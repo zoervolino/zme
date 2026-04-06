@@ -4347,6 +4347,7 @@ def _overlapping_fill_below(sp, slide_root) -> str | None:
         return None
     ax, ay, acx, acy = bbox
     best = None
+    best_area = None
     for sibling in spTree:
         if sibling is sp:
             break   # stop at our own shape (only look at lower z-order)
@@ -4360,7 +4361,12 @@ def _overlapping_fill_below(sp, slide_root) -> str | None:
             continue
         bx, by, bcx, bcy = sbb
         if ax < bx + bcx and ax + acx > bx and ay < by + bcy and ay + acy > by:
-            best = fill   # last overlapping fill wins (topmost below us)
+            area = bcx * bcy
+            # Prefer the smallest overlapping filled shape, which is more likely
+            # to be the immediate face/card behind the text than a giant band.
+            if best is None or best_area is None or area <= best_area:
+                best = fill
+                best_area = area
     return best
 
 
@@ -5540,12 +5546,55 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
 
         # Pattern B — bg rect + label pair(s)
         if bg_shapes and label_shapes:
-            # Largest bg rect determines the group's background color
-            bg_sp, bg_fill = max(bg_shapes, key=lambda t: _sp_area_emu(t[0]))
-            if bg_fill and bg_fill not in rag_preserve:
-                tc = "FFFFFF" if _bg_is_dark(bg_fill) else "1D1D1D"
-                for lsp in label_shapes:
-                    count += _set_text_color_preserving_emphasis(lsp, tc, rag_preserve)
+            def _bbox(sp):
+                spPr = sp.find(f"{{{NS_P}}}spPr")
+                if spPr is None:
+                    return None
+                xfrm = spPr.find(f"{{{NS_A}}}xfrm")
+                if xfrm is None:
+                    return None
+                off = xfrm.find(f"{{{NS_A}}}off")
+                ext = xfrm.find(f"{{{NS_A}}}ext")
+                if off is None or ext is None:
+                    return None
+                try:
+                    return (
+                        int(off.get("x", 0)),
+                        int(off.get("y", 0)),
+                        int(ext.get("cx", 0)),
+                        int(ext.get("cy", 0)),
+                    )
+                except ValueError:
+                    return None
+
+            for lsp in label_shapes:
+                lbb = _bbox(lsp)
+                if lbb is None:
+                    continue
+                lx, ly, lcx, lcy = lbb
+                chosen_fill = None
+                chosen_area = None
+                for bg_sp, bg_fill in bg_shapes:
+                    if not bg_fill or bg_fill in rag_preserve:
+                        continue
+                    bbb = _bbox(bg_sp)
+                    if bbb is None:
+                        continue
+                    bx, by, bcx, bcy = bbb
+                    overlaps = lx < bx + bcx and lx + lcx > bx and ly < by + bcy and ly + lcy > by
+                    contains = lx >= bx and ly >= by and (lx + lcx) <= (bx + bcx) and (ly + lcy) <= (by + bcy)
+                    if not overlaps:
+                        continue
+                    area = bcx * bcy
+                    # Prefer the smallest containing/overlapping background so
+                    # labels on light inner faces don't inherit a dark outer band.
+                    if chosen_fill is None or (contains and (chosen_area is None or area < chosen_area)) or (chosen_area is not None and area < chosen_area):
+                        chosen_fill = bg_fill
+                        chosen_area = area
+                if chosen_fill is None:
+                    continue
+                tc = "FFFFFF" if _bg_is_dark(chosen_fill) else "1D1D1D"
+                count += _set_text_color_preserving_emphasis(lsp, tc, rag_preserve)
 
     return count
 
