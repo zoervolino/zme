@@ -1903,14 +1903,14 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
 
         looks_like_cover = (
             slide_idx == 1
-            and m["body_chars"] < 80
-            and m["n_extra"] <= 1
-            and m["total_chars"] < 180
+            and m["body_chars"] < 120
+            and m["n_extra"] <= 2
+            and m["total_chars"] < 260
         )
 
         # Slide 1 sparse opener should resolve to cover even if the agent calls it
         # a divider because the visual treatment is banded/section-like.
-        if looks_like_cover and slide_type in {"cover", "divider"}:
+        if slide_idx == 1 and slide_type in {"cover", "divider"} and not has_subtitle:
             cover = "Cover_Dark" if is_dark else "Cover_Light"
             if cover in v7_name_map:
                 return v7_name_map[cover], f"agent({slide_type}) → {cover}"
@@ -3046,6 +3046,16 @@ def lift_text_into_placeholders(slide_root, layout_name, title_hint=None):
         if spPr is not None:
             for xfrm in spPr.findall(f"{{{NS_A}}}xfrm"):
                 spPr.remove(xfrm)
+            for fill_tag in (
+                f"{{{NS_A}}}solidFill",
+                f"{{{NS_A}}}gradFill",
+                f"{{{NS_A}}}pattFill",
+                f"{{{NS_A}}}blipFill",
+            ):
+                for el in spPr.findall(fill_tag):
+                    spPr.remove(el)
+            if spPr.find(f"{{{NS_A}}}noFill") is None:
+                spPr.insert(0, etree.Element(f"{{{NS_A}}}noFill"))
 
         txBody = sp.find(f"{{{NS_P}}}txBody")
         if txBody is None:
