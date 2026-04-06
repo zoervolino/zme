@@ -5190,6 +5190,43 @@ def _promote_header_kicker_title(slide_root) -> bool:
     if best is None:
         return False
 
+    def _reset_promoted_placeholder(sp):
+        spPr = sp.find(f"{{{NS_P}}}spPr")
+        if spPr is not None:
+            for xfrm in spPr.findall(f"{{{NS_A}}}xfrm"):
+                spPr.remove(xfrm)
+            for fill_tag in (
+                f"{{{NS_A}}}solidFill",
+                f"{{{NS_A}}}gradFill",
+                f"{{{NS_A}}}pattFill",
+                f"{{{NS_A}}}blipFill",
+            ):
+                for el in spPr.findall(fill_tag):
+                    spPr.remove(el)
+            if spPr.find(f"{{{NS_A}}}noFill") is None:
+                spPr.insert(0, etree.Element(f"{{{NS_A}}}noFill"))
+
+        txBody = sp.find(f"{{{NS_P}}}txBody")
+        if txBody is None:
+            return
+        for lst in txBody.findall(f"{{{NS_A}}}lstStyle"):
+            txBody.remove(lst)
+        _KEEP_ATTRS = {"lang", "dirty", "smtClean"}
+        for tag in (f"{{{NS_A}}}rPr", f"{{{NS_A}}}endParaRPr", f"{{{NS_A}}}defRPr"):
+            for rPr in txBody.iter(tag):
+                for child in list(rPr):
+                    rPr.remove(child)
+                for attr in list(rPr.attrib):
+                    if attr not in _KEEP_ATTRS:
+                        del rPr.attrib[attr]
+        for pPr in txBody.iter(f"{{{NS_A}}}pPr"):
+            for attr in list(pPr.attrib):
+                del pPr.attrib[attr]
+            for child in list(pPr):
+                pPr.remove(child)
+            if pPr.find(f"{{{NS_A}}}buNone") is None:
+                pPr.append(etree.Element(f"{{{NS_A}}}buNone"))
+
     # Turn the current title into the subtitle placeholder so it inherits the
     # real subtitle position/style on Light_Sub-like layouts.
     title_ph = title_sp.find(f".//{{{NS_P}}}ph")
@@ -5197,10 +5234,7 @@ def _promote_header_kicker_title(slide_root) -> bool:
         return False
     title_ph.set("type", "body")
     title_ph.set("idx", "12")
-    title_spPr = title_sp.find(f"{{{NS_P}}}spPr")
-    if title_spPr is not None:
-        for xfrm in title_spPr.findall(f"{{{NS_A}}}xfrm"):
-            title_spPr.remove(xfrm)
+    _reset_promoted_placeholder(title_sp)
 
     best_nvSpPr = best.find(f"{{{NS_P}}}nvSpPr")
     if best_nvSpPr is None:
@@ -5212,14 +5246,7 @@ def _promote_header_kicker_title(slide_root) -> bool:
         best_nvPr.remove(old)
     best_ph = etree.SubElement(best_nvPr, f"{{{NS_P}}}ph")
     best_ph.set("type", "title")
-    best_spPr = best.find(f"{{{NS_P}}}spPr")
-    if best_spPr is not None:
-        for xfrm in best_spPr.findall(f"{{{NS_A}}}xfrm"):
-            best_spPr.remove(xfrm)
-    txBody = best.find(f"{{{NS_P}}}txBody")
-    if txBody is not None:
-        for lst in txBody.findall(f"{{{NS_A}}}lstStyle"):
-            txBody.remove(lst)
+    _reset_promoted_placeholder(best)
 
     return True
 
@@ -5311,9 +5338,8 @@ def _normalize_kicker_labels(slide_root) -> int:
         return 0
 
     for sp in spTree.iter(f"{{{NS_P}}}sp"):
-        # Must be a free-form shape, not a placeholder
         ph = sp.find(f".//{{{NS_P}}}ph")
-        if ph is not None:
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle", "subTitle", "dt", "ftr", "sldNum"}:
             continue
 
         # Must be in the title region (y < 1.5 in)
