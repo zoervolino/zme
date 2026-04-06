@@ -2683,7 +2683,7 @@ def promote_bullet_txbox(slide_root, file_map, slide_path):
     return True
 
 
-def strip_footer_placeholders(slide_root, inject=True):
+def strip_footer_placeholders(slide_root, inject=True, slide_idx=None):
     """
     Remove dt/ftr shapes entirely.
     If inject=True: remove any existing sldNum, inject a fresh one with
@@ -2703,6 +2703,31 @@ def strip_footer_placeholders(slide_root, inject=True):
         if ph.get("type", "") in ("dt", "ftr", "sldNum"):
             spTree.remove(sp)
             touched += 1
+
+    # Remove stray free-form corner slide numbers from the source deck.
+    # These often survive the master swap because they are plain text boxes
+    # rather than real placeholders.
+    idx_text = str(slide_idx).strip() if slide_idx is not None else ""
+    if idx_text:
+        for sp in list(spTree.findall(f"{{{NS_P}}}sp")):
+            ph = sp.find(f".//{{{NS_P}}}ph")
+            if ph is not None:
+                continue
+            txt = _shape_text(sp).strip()
+            if txt != idx_text:
+                continue
+            bbox = _shape_bbox(sp)
+            if bbox is None:
+                continue
+            x, y, cx, cy = bbox
+            in_top_band = y <= int(0.10 * 6_858_000)
+            in_bottom_band = (y + cy) >= int(0.90 * 6_858_000)
+            in_left_edge = x <= int(0.08 * 12_192_000)
+            in_right_edge = (x + cx) >= int(0.92 * 12_192_000)
+            tiny = cx <= int(0.08 * 12_192_000) and cy <= int(0.06 * 6_858_000)
+            if tiny and ((in_top_band or in_bottom_band) and (in_left_edge or in_right_edge)):
+                spTree.remove(sp)
+                touched += 1
 
     if not inject:
         return touched
@@ -2730,19 +2755,23 @@ def strip_footer_placeholders(slide_root, inject=True):
     bodyPr.set("vert", "horz"); bodyPr.set("wrap", "square"); bodyPr.set("anchor", "ctr")
     lstStyle = etree.SubElement(txBody, f"{{{NS_A}}}lstStyle")
     lvl1    = etree.SubElement(lstStyle, f"{{{NS_A}}}lvl1pPr")
-    lvl1.set("algn", "l")
+    lvl1.set("algn", "ctr")
     defRPr  = etree.SubElement(lvl1, f"{{{NS_A}}}defRPr")
-    defRPr.set("lang", "en-US"); defRPr.set("sz", "1000")
+    defRPr.set("lang", "en-US"); defRPr.set("sz", "800")
     solidFill = etree.SubElement(defRPr, f"{{{NS_A}}}solidFill")
     srgb    = etree.SubElement(solidFill, f"{{{NS_A}}}srgbClr")
-    srgb.set("val", "767676")
+    srgb.set("val", "B3BBCA")
     latin   = etree.SubElement(defRPr, f"{{{NS_A}}}latin")
     latin.set("typeface", "Arial"); latin.set("pitchFamily", "34"); latin.set("charset", "0")
     p_el    = etree.SubElement(txBody, f"{{{NS_A}}}p")
+    pPr     = etree.SubElement(p_el, f"{{{NS_A}}}pPr")
+    pPr.set("algn", "ctr")
     fld     = etree.SubElement(p_el, f"{{{NS_A}}}fld")
     fld.set("id", "{" + str(uuid.uuid4()).upper() + "}"); fld.set("type", "slidenum")
     etree.SubElement(fld, f"{{{NS_A}}}t").text = "<#>"
-    etree.SubElement(p_el, f"{{{NS_A}}}endParaRPr").set("lang", "en-US")
+    end_rpr = etree.SubElement(p_el, f"{{{NS_A}}}endParaRPr")
+    end_rpr.set("lang", "en-US")
+    end_rpr.set("sz", "800")
 
     return touched
 
@@ -4669,6 +4698,79 @@ def _style_table_body_bands(slide_root) -> int:
 
 _KICKER_BULLET_GLYPHS = {"•", "▪", "‣", "–", "—", "›", "»", "·"}
 
+def _remove_duplicate_header_title_fragments(slide_root) -> int:
+    """Remove short free-form header fragments that duplicate the final title.
+
+    Some legacy decks carry a small kicker/bullet line above the real title that
+    repeats the exact same copy. After title injection/promotion, treat the title
+    placeholder as canonical and remove those duplicate source fragments.
+    """
+    spTree = slide_root.find(f".//{{{NS_P}}}spTree")
+    if spTree is None:
+        return 0
+
+    title_text = ""
+    title_y = None
+    title_font = 0
+    for sp in spTree.findall(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is None or ph.get("type", "") not in {"title", "ctrTitle"}:
+            continue
+        title_text = _shape_text(sp).strip()
+        bbox = _shape_bbox(sp)
+        if bbox is not None:
+            _, title_y, _, _ = bbox
+        title_font = _shape_font_size(sp)
+        if title_text:
+            break
+    if not title_text:
+        return 0
+
+    norm_title = _normalize_text_for_match(title_text)
+    if not norm_title:
+        return 0
+
+    removed = 0
+    for sp in list(spTree.findall(f"{{{NS_P}}}sp")):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None:
+            continue
+        if not _is_header_zone(sp):
+            continue
+
+        txt = _shape_text(sp).strip()
+        if not txt or len(txt) > max(140, int(len(title_text) * 1.25)):
+            continue
+        paragraphs = list(sp.iter(f"{{{NS_A}}}p"))
+        if len(paragraphs) > 2:
+            continue
+
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        _, y, _, cy = bbox
+        if cy > int(0.12 * 6_858_000):
+            continue
+        if title_y is not None and y > title_y + int(0.06 * 6_858_000):
+            continue
+
+        norm_txt = _normalize_text_for_match(txt)
+        if not norm_txt:
+            continue
+        overlap = _text_overlap_score(norm_txt, norm_title)
+        contains = norm_title in norm_txt or norm_txt in norm_title
+        if overlap < 0.82 and not contains:
+            continue
+
+        candidate_font = _shape_font_size(sp)
+        if candidate_font and title_font and candidate_font >= title_font:
+            continue
+
+        spTree.remove(sp)
+        removed += 1
+
+    return removed
+
 def _normalize_kicker_labels(slide_root) -> int:
     """Strip stray bullet glyphs from short standalone text near the title region.
     Returns count of paragraphs modified."""
@@ -5245,7 +5347,7 @@ def convert(source_path: Path, forced_layouts: dict = None):
                 v7_layout_name = "Title_Only_Light"
                 print(f"         bullet txBox → body ph, layout → {body_num} (Title_Only_Light)")
 
-        n_footer = strip_footer_placeholders(slide_root, inject=(i > 1))
+        n_footer = strip_footer_placeholders(slide_root, inject=(i > 1), slide_idx=i)
         if n_footer:
             print(f"         stripped: {n_footer} old footer/sldNum shape(s)")
 
@@ -5289,6 +5391,10 @@ def convert(source_path: Path, forced_layouts: dict = None):
         n_kicker = _normalize_kicker_labels(slide_root)
         if n_kicker:
             print(f"         kicker   : {n_kicker} label(s) bullet-stripped")
+
+        n_title_dupes = _remove_duplicate_header_title_fragments(slide_root)
+        if n_title_dupes:
+            print(f"         deduped  : {n_title_dupes} duplicate header title fragment(s) removed")
 
         n_bullets = _normalize_bullets(slide_root)
         if n_bullets:
