@@ -2069,6 +2069,9 @@ with tab_convert:
             "Results stream in slide-by-slide."
         )
 
+        if "vit_results" not in st.session_state:
+            st.session_state["vit_results"] = []
+
         _vit_upload = st.file_uploader(
             "Upload PPTX", type=["pptx"], key="vit_pptx",
         )
@@ -2079,6 +2082,7 @@ with tab_convert:
                 _vit_tmp_p = Path(_vit_tmp)
                 _vit_src   = _vit_tmp_p / _vit_upload.name
                 _vit_src.write_bytes(_vit_upload.getvalue())
+                st.session_state["vit_results"] = []
 
                 _vit_status = st.empty()
 
@@ -2161,104 +2165,125 @@ with tab_convert:
                                 "timeout" if "timeout" in str(_v_ae).lower()
                                 else str(_v_ae)
                             )
-
-                        with _vit_grid:
-                            with st.container():
-                                st.markdown(f"---\n#### Slide {_vi + 1} of {_vit_n}")
-                                _vc1, _vc2 = st.columns(2)
-                                with _vc1:
-                                    st.caption("Original")
-                                    st.image(_v_png_bytes, use_container_width=True)
-                                with _vc2:
-                                    st.caption("AI Render")
-                                    if _v_html:
-                                        _v_html_clean = _v_html
-                                        _v_shared_style = (
-                                            '<style>'
-                                            '*{box-sizing:border-box;}'
-                                            'body{margin:0;padding:0;overflow:hidden;}'
-                                            'h1,h2,h3,h4,[class*="title"],[class*="subtitle"],'
-                                            '[class*="stat"],[class*="callout"]{'
-                                            "font-family:'Segoe UI',sans-serif!important;}"
-                                            'p,li,td,th,span,div,[class*="body"],'
-                                            '[class*="bullet"],[class*="kicker"]{'
-                                            'font-family:Arial,sans-serif!important;}'
-                                            '</style>'
-                                        )
-                                        _v_frame = (
-                                            _v_shared_style
-                                            + '<div style="width:1280px;height:720px;'
-                                            'transform:scale(0.5);transform-origin:top left;'
-                                            'overflow:hidden;">'
-                                            + _v_html_clean
-                                            + '</div>'
-                                        )
-                                        components.html(_v_frame, height=360, scrolling=False)
-                                        _v_dl_doc = (
-                                            '<!DOCTYPE html><html lang="en"><head>'
-                                            '<meta charset="UTF-8">'
-                                            '<meta name="viewport" content="width=1280">'
-                                            '<title>Slide ' + str(_vi + 1) + '</title>'
-                                            + _v_shared_style.replace(
-                                                'body{margin:0;padding:0;overflow:hidden;}',
-                                                'body{margin:0;padding:0;width:1280px;height:720px;overflow:hidden;}'
-                                            )
-                                            + '</head><body>'
-                                            + _v_html_clean
-                                            + '</body></html>'
-                                        )
-                                        st.download_button(
-                                            label=f"⬇ slide_{_vi + 1:02d}.html",
-                                            data=_v_dl_doc.encode("utf-8"),
-                                            file_name=f"slide_{_vi + 1:02d}.html",
-                                            mime="text/html",
-                                            key=f"vit_dl_{_vi}",
-                                        )
-                                        if _v_regions:
-                                            st.download_button(
-                                                label=f"⬇ slide_{_vi + 1:02d}_regions.json",
-                                                data=json.dumps(_v_regions, indent=2).encode("utf-8"),
-                                                file_name=f"slide_{_vi + 1:02d}_regions.json",
-                                                mime="application/json",
-                                                key=f"vit_regions_{_vi}",
-                                            )
-                                        if _v_refined_layout:
-                                            st.download_button(
-                                                label=f"⬇ slide_{_vi + 1:02d}_pptx_layout.json",
-                                                data=json.dumps(_v_refined_layout, indent=2).encode("utf-8"),
-                                                file_name=f"slide_{_vi + 1:02d}_pptx_layout.json",
-                                                mime="application/json",
-                                                key=f"vit_layout_{_vi}",
-                                            )
-                                        if _v_pptx:
-                                            st.download_button(
-                                                label=f"⬇ slide_{_vi + 1:02d}.pptx",
-                                                data=_v_pptx,
-                                                file_name=f"slide_{_vi + 1:02d}.pptx",
-                                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                                key=f"vit_pptx_{_vi}",
-                                            )
-                                        with st.expander("Raw response", expanded=False):
-                                            st.code(_v_raw[:12000] or "(empty)", language="text")
-                                        if _v_regions:
-                                            with st.expander("Structured regions", expanded=False):
-                                                st.json(_v_regions)
-                                        if _v_refined_layout:
-                                            with st.expander("Refined PPTX layout", expanded=False):
-                                                st.json(_v_refined_layout)
-                                    elif _v_raw:
-                                        st.warning("Model returned content, but it was not valid raw HTML.")
-                                        with st.expander("Raw response", expanded=True):
-                                            st.code(_v_raw[:12000], language="text")
-                                    elif _v_err == "timeout":
-                                        st.warning("⏱ API request timed out for this slide.")
-                                    else:
-                                        st.error(f"Agent error: {_v_err}")
-                                        if _v_raw:
-                                            with st.expander("Raw response", expanded=False):
-                                                st.code(_v_raw[:12000], language="text")
+                        st.session_state["vit_results"].append({
+                            "slide_num": _vi + 1,
+                            "slide_total": _vit_n,
+                            "png_bytes": _v_png_bytes,
+                            "html": _v_html,
+                            "regions": _v_regions,
+                            "refined_layout": _v_refined_layout,
+                            "pptx": _v_pptx,
+                            "raw": _v_raw,
+                            "err": _v_err,
+                        })
 
                     _vit_status.success(f"✓ Done — {_vit_n} slides processed.")
+
+        for _idx, _res in enumerate(st.session_state.get("vit_results", [])):
+            with _vit_grid if "_vit_grid" in locals() else st.container():
+                with st.container():
+                    _slide_num = _res["slide_num"]
+                    _slide_total = _res["slide_total"]
+                    _v_png_bytes = _res["png_bytes"]
+                    _v_html = _res["html"]
+                    _v_regions = _res["regions"]
+                    _v_refined_layout = _res["refined_layout"]
+                    _v_pptx = _res["pptx"]
+                    _v_raw = _res["raw"]
+                    _v_err = _res["err"]
+                    st.markdown(f"---\n#### Slide {_slide_num} of {_slide_total}")
+                    _vc1, _vc2 = st.columns(2)
+                    with _vc1:
+                        st.caption("Original")
+                        st.image(_v_png_bytes, use_container_width=True)
+                    with _vc2:
+                        st.caption("AI Render")
+                        if _v_html:
+                            _v_html_clean = _v_html
+                            _v_shared_style = (
+                                '<style>'
+                                '*{box-sizing:border-box;}'
+                                'body{margin:0;padding:0;overflow:hidden;}'
+                                'h1,h2,h3,h4,[class*="title"],[class*="subtitle"],'
+                                '[class*="stat"],[class*="callout"]{'
+                                "font-family:'Segoe UI',sans-serif!important;}"
+                                'p,li,td,th,span,div,[class*="body"],'
+                                '[class*="bullet"],[class*="kicker"]{'
+                                'font-family:Arial,sans-serif!important;}'
+                                '</style>'
+                            )
+                            _v_frame = (
+                                _v_shared_style
+                                + '<div style="width:1280px;height:720px;'
+                                'transform:scale(0.5);transform-origin:top left;'
+                                'overflow:hidden;">'
+                                + _v_html_clean
+                                + '</div>'
+                            )
+                            components.html(_v_frame, height=360, scrolling=False)
+                            _v_dl_doc = (
+                                '<!DOCTYPE html><html lang="en"><head>'
+                                '<meta charset="UTF-8">'
+                                '<meta name="viewport" content="width=1280">'
+                                '<title>Slide ' + str(_slide_num) + '</title>'
+                                + _v_shared_style.replace(
+                                    'body{margin:0;padding:0;overflow:hidden;}',
+                                    'body{margin:0;padding:0;width:1280px;height:720px;overflow:hidden;}'
+                                )
+                                + '</head><body>'
+                                + _v_html_clean
+                                + '</body></html>'
+                            )
+                            st.download_button(
+                                label=f"⬇ slide_{_slide_num:02d}.html",
+                                data=_v_dl_doc.encode("utf-8"),
+                                file_name=f"slide_{_slide_num:02d}.html",
+                                mime="text/html",
+                                key=f"vit_dl_{_idx}",
+                            )
+                            if _v_regions:
+                                st.download_button(
+                                    label=f"⬇ slide_{_slide_num:02d}_regions.json",
+                                    data=json.dumps(_v_regions, indent=2).encode("utf-8"),
+                                    file_name=f"slide_{_slide_num:02d}_regions.json",
+                                    mime="application/json",
+                                    key=f"vit_regions_{_idx}",
+                                )
+                            if _v_refined_layout:
+                                st.download_button(
+                                    label=f"⬇ slide_{_slide_num:02d}_pptx_layout.json",
+                                    data=json.dumps(_v_refined_layout, indent=2).encode("utf-8"),
+                                    file_name=f"slide_{_slide_num:02d}_pptx_layout.json",
+                                    mime="application/json",
+                                    key=f"vit_layout_{_idx}",
+                                )
+                            if _v_pptx:
+                                st.download_button(
+                                    label=f"⬇ slide_{_slide_num:02d}.pptx",
+                                    data=_v_pptx,
+                                    file_name=f"slide_{_slide_num:02d}.pptx",
+                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                    key=f"vit_pptx_{_idx}",
+                                )
+                            with st.expander("Raw response", expanded=False):
+                                st.code(_v_raw[:12000] or "(empty)", language="text")
+                            if _v_regions:
+                                with st.expander("Structured regions", expanded=False):
+                                    st.json(_v_regions)
+                            if _v_refined_layout:
+                                with st.expander("Refined PPTX layout", expanded=False):
+                                    st.json(_v_refined_layout)
+                        elif _v_raw:
+                            st.warning("Model returned content, but it was not valid raw HTML.")
+                            with st.expander("Raw response", expanded=True):
+                                st.code(_v_raw[:12000], language="text")
+                        elif _v_err == "timeout":
+                            st.warning("⏱ API request timed out for this slide.")
+                        else:
+                            st.error(f"Agent error: {_v_err}")
+                            if _v_raw:
+                                with st.expander("Raw response", expanded=False):
+                                    st.code(_v_raw[:12000], language="text")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
