@@ -1797,6 +1797,57 @@ def _validate_subtitle(text: str):
     return t
 
 
+def _normalize_recommended_layout(layout_name: str, v7_name_map: dict, is_dark: bool = False):
+    """Map agent-recommended layout aliases onto concrete v7 layout names."""
+    if not layout_name:
+        return None
+    raw = str(layout_name).strip()
+    if not raw:
+        return None
+    if raw in v7_name_map:
+        return raw
+
+    key = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    alias_map = {
+        "content_light_sub": "Light_Sub",
+        "light_sub": "Light_Sub",
+        "content_dark_sub": "Dark_Sub",
+        "dark_sub": "Dark_Sub",
+        "content_light": "Title_Only_Light",
+        "title_only_light": "Title_Only_Light",
+        "content_dark": "Title_Only_Dark",
+        "title_only_dark": "Title_Only_Dark",
+        "cover_light": "Cover_Light",
+        "cover_dark": "Cover_Dark",
+        "divider_dark": "Divider_Dark",
+        "divider_light": "Divider_Light",
+        "divider_crystal": "Divider_Crystal",
+        "ending_pivotpurple": "Ending_PivotPurple",
+        "ending_pivot_purple": "Ending_PivotPurple",
+    }
+    mapped = alias_map.get(key)
+    if mapped in v7_name_map:
+        return mapped
+
+    if "sub" in key:
+        fallback = "Dark_Sub" if is_dark else "Light_Sub"
+        if fallback in v7_name_map:
+            return fallback
+    if "cover" in key:
+        fallback = "Cover_Dark" if is_dark else "Cover_Light"
+        if fallback in v7_name_map:
+            return fallback
+    if "divider" in key or "section" in key or "interstitial" in key:
+        for cand in ("Divider_Dark", "Divider_Light", "Divider_Crystal"):
+            if cand in v7_name_map:
+                return cand
+    if "ending" in key or "thank" in key:
+        if "Ending_PivotPurple" in v7_name_map:
+            return "Ending_PivotPurple"
+
+    return None
+
+
 def resolve_layout(old_name, v7_name_map, slide_root=None,
                    slide_idx: int = 0, total_slides: int = 0,
                    agent_hint: dict = None):
@@ -1844,6 +1895,26 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
     # Exceptions: Dividers, Endings, and Covers are still detected structurally.
     if agent_hint is not None and slide_root is not None:
         m = _scan_slide_content(slide_root)
+        is_dark = _bg_is_dark(_slide_bg_hex(slide_root))
+        rec_layout = _normalize_recommended_layout(
+            agent_hint.get("recommended_layout"), v7_name_map, is_dark=is_dark
+        )
+        slide_type = str(agent_hint.get("slide_type") or "").strip().lower()
+
+        looks_like_cover = (
+            slide_idx == 1
+            and m["body_chars"] < 80
+            and m["n_extra"] <= 1
+            and m["total_chars"] < 180
+        )
+
+        # Slide 1 sparse opener should resolve to cover even if the agent calls it
+        # a divider because the visual treatment is banded/section-like.
+        if looks_like_cover and slide_type in {"cover", "divider"}:
+            cover = "Cover_Dark" if is_dark else "Cover_Light"
+            if cover in v7_name_map:
+                return v7_name_map[cover], f"agent({slide_type}) → {cover}"
+
         # Divider: trust semantic match if it resolved to a divider layout
         if matched_layout in ("Divider_Dark", "Divider_Light", "Divider_Crystal"):
             layout_path = v7_name_map.get(matched_layout)
@@ -1859,19 +1930,14 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
                 if "Ending_PivotPurple" in v7_name_map:
                     return v7_name_map["Ending_PivotPurple"], f"agent → Ending_PivotPurple"
 
-        is_dark = _bg_is_dark(_slide_bg_hex(slide_root))
+        if rec_layout:
+            return v7_name_map[rec_layout], f"agent recommended → {rec_layout}"
+
         if is_dark:
             name = "Dark_Sub" if has_subtitle else "Title_Only_Dark"
         else:
             name = "Light_Sub" if has_subtitle else "Title_Only_Light"
         # Cover exception only when slide 1 is genuinely sparse / cover-like.
-        looks_like_cover = (
-            slide_idx == 1
-            and m["body_chars"] < 80
-            and m["n_extra"] <= 1
-            and m["total_chars"] < 180
-            and not m["is_divider_block"]
-        )
         if looks_like_cover:
             cover = "Cover_Dark" if is_dark else "Cover_Light"
             if cover in v7_name_map:
@@ -2424,9 +2490,109 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
     date_text = date_candidate[0] if date_candidate else None
     date_sp   = date_candidate[1] if date_candidate else None
 
+    def _is_neutral_hex(hex6: str) -> bool:
+        if not hex6 or len(hex6) != 6:
+            return True
+        try:
+            r = int(hex6[0:2], 16)
+            g = int(hex6[2:4], 16)
+            b = int(hex6[4:6], 16)
+        except ValueError:
+            return True
+        return (abs(r - g) <= 18 and abs(g - b) <= 18) or hex6.upper() in {
+            "000000", "1D1D1D", "333333", "666666", "767676", "7A828D",
+            "B3BBCA", "C0C0C0", "D9D9D9", "FFFFFF",
+        }
+
+    def _collect_title_emphasis(target_text: str):
+        """Collect explicit colored run phrases from duplicate title fragments."""
+        if not target_text or not target_text.strip():
+            return []
+        found = []
+        seen = set()
+        norm_target = _normalize_text_for_match(target_text)
+        for sp in _matching_text_shapes(slide_root, target_text, header_only=True, min_overlap=0.60):
+            for r in sp.iter(f"{{{NS_A}}}r"):
+                t_el = r.find(f"{{{NS_A}}}t")
+                rPr = r.find(f"{{{NS_A}}}rPr")
+                if t_el is None or rPr is None:
+                    continue
+                phrase = (t_el.text or "").strip()
+                if len(phrase) < 2 or len(phrase) >= len(target_text):
+                    continue
+                sf = rPr.find(f"{{{NS_A}}}solidFill")
+                srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
+                hex6 = srgb.get("val", "").upper() if srgb is not None else ""
+                norm_phrase = _normalize_text_for_match(phrase)
+                if not hex6 or _is_neutral_hex(hex6) or not norm_phrase or norm_phrase not in norm_target:
+                    continue
+                key = (norm_phrase, hex6)
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({"phrase": phrase, "color": hex6})
+        found.sort(key=lambda item: len(item["phrase"]), reverse=True)
+        return found
+
+    def _apply_title_emphasis(title_sp, full_text: str, emphasis_parts: list):
+        if not emphasis_parts:
+            return False
+        txBody = title_sp.find(f"{{{NS_P}}}txBody")
+        if txBody is None:
+            return False
+        p_el = txBody.find(f"{{{NS_A}}}p")
+        if p_el is None:
+            return False
+
+        chosen = []
+        working = full_text
+        lower_working = working.lower()
+        for part in emphasis_parts:
+            phrase = part["phrase"]
+            phrase_l = phrase.lower()
+            idx = lower_working.find(phrase_l)
+            if idx == -1:
+                continue
+            chosen.append((idx, idx + len(phrase), part["color"]))
+            working = working[:idx] + (" " * len(phrase)) + working[idx + len(phrase):]
+            lower_working = working.lower()
+        if not chosen:
+            return False
+        chosen.sort(key=lambda item: item[0])
+
+        for child in list(p_el):
+            p_el.remove(child)
+
+        cursor = 0
+        for start, end, color in chosen:
+            if start > cursor:
+                r_plain = etree.SubElement(p_el, f"{{{NS_A}}}r")
+                rPr_plain = etree.SubElement(r_plain, f"{{{NS_A}}}rPr")
+                rPr_plain.set("lang", "en-US")
+                rPr_plain.set("dirty", "0")
+                t_plain = etree.SubElement(r_plain, f"{{{NS_A}}}t")
+                t_plain.text = full_text[cursor:start]
+            r_em = etree.SubElement(p_el, f"{{{NS_A}}}r")
+            rPr_em = etree.SubElement(r_em, f"{{{NS_A}}}rPr")
+            rPr_em.set("lang", "en-US")
+            rPr_em.set("dirty", "0")
+            _set_rpr_color(rPr_em, color)
+            t_em = etree.SubElement(r_em, f"{{{NS_A}}}t")
+            t_em.text = full_text[start:end]
+            cursor = end
+        if cursor < len(full_text):
+            r_tail = etree.SubElement(p_el, f"{{{NS_A}}}r")
+            rPr_tail = etree.SubElement(r_tail, f"{{{NS_A}}}rPr")
+            rPr_tail.set("lang", "en-US")
+            rPr_tail.set("dirty", "0")
+            t_tail = etree.SubElement(r_tail, f"{{{NS_A}}}t")
+            t_tail.text = full_text[cursor:]
+        return True
+
     # -- Remove old title/subtitle shapes from the slide ----------------------
     title_norm = (title_text    or "").strip().lower()
     sub_norm   = (subtitle_text or "").strip().lower()
+    title_emphasis = _collect_title_emphasis(title_text)
 
     to_remove = []
     for sp in list(spTree):
@@ -2532,6 +2698,8 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
 
     if title_text:
         title_sp = _make_ph_sp("title", None, title_text, max_id + 1, "Title 1")
+        if title_emphasis:
+            _apply_title_emphasis(title_sp, title_text, title_emphasis)
         spTree.insert(0, title_sp)
         max_id += 1
         injected_title = True
@@ -3947,9 +4115,13 @@ def _bg_is_dark(v: str) -> bool:
 
 def _shape_fill_hex(sp) -> str | None:
     """Effective solid fill of a shape post-remap, or None if transparent.
-    For gradients, returns the darkest stop (worst-case for text readability)."""
+    For gradients, returns the darkest stop (worst-case for text readability).
+    Also resolves p:style > a:fillRef theme fills so contrast enforcement can
+    see branded diagram/card backgrounds that inherit their face color."""
     spPr = sp.find(f"{{{NS_P}}}spPr")
     if spPr is None:
+        return None
+    if spPr.find(f"{{{NS_A}}}noFill") is not None:
         return None
     solidFill = spPr.find(f"{{{NS_A}}}solidFill")
     if solidFill is not None:
@@ -3968,6 +4140,16 @@ def _shape_fill_hex(sp) -> str | None:
             return min(hexes, key=lambda h: (
                 0.299 * int(h[0:2], 16) + 0.587 * int(h[2:4], 16) + 0.114 * int(h[4:6], 16)
             ))
+    fillRef = sp.find(f"{{{NS_P}}}style/{{{NS_A}}}fillRef")
+    if fillRef is not None:
+        srgb = fillRef.find(f"{{{NS_A}}}srgbClr")
+        if srgb is not None and srgb.get("val"):
+            return srgb.get("val", "").upper() or None
+        schemeClr = fillRef.find(f"{{{NS_A}}}schemeClr")
+        if schemeClr is not None:
+            base = SCHEME_FILL_MAP.get(schemeClr.get("val", ""), "1D1D1D")
+            transforms = list(schemeClr)
+            return _apply_scheme_transforms(base, transforms) if transforms else base
     return None   # noFill / blipFill / pattFill / unspecified → transparent
 
 
@@ -4733,7 +4915,7 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
     removed = 0
     for sp in list(spTree.findall(f"{{{NS_P}}}sp")):
         ph = sp.find(f".//{{{NS_P}}}ph")
-        if ph is not None:
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle", "subTitle", "dt", "ftr", "sldNum"}:
             continue
         if not _is_header_zone(sp):
             continue
