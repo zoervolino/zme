@@ -1459,11 +1459,11 @@ with tab_convert:
     # ── Visual Ingest Test mode ────────────────────────────────────────────────
     elif _cmode == "Visual Ingest Test":
 
-        _VIT_PROMPT_TMPL = (
+        _VIT_REGIONS_PROMPT_TMPL = (
             "You are a presentation slide designer. You will receive a rasterized image "
             "of a slide as a file attachment and its cleaned XML structure.\n\n"
-            "Your job is to re-render this slide as clean, brand-compliant HTML that "
-            "faithfully represents the slide's content and visual intent.\n\n"
+            "Your job is to extract a structured region specification for the slide. "
+            "Do not render HTML in this step.\n\n"
             "═══════════════════════════════════════\n"
             "FULCRUMQ BRAND GUIDELINES — APPLY EXACTLY\n\n"
             "Canvas: 1280×720px (16:9), fixed size, no scrolling\n\n"
@@ -1611,14 +1611,29 @@ with tab_convert:
             "- Regions must describe the major slide structure, not every tiny word\n"
             "- Mark screenshot-heavy or image-heavy regions with preserve_as_image=true\n"
             "- The region list should be sufficient to recreate the slide in native PPTX objects and placed images\n\n"
-            "Then after ---HTML--- output the HTML div as normal. Start your response with ---REGIONS---.\n"
+            "Start your response with ---REGIONS---.\n"
             "CRITICAL OUTPUT FORMAT RULES:\n"
             "- After ---REGIONS---, output valid JSON only\n"
-            "- After ---HTML---, output raw HTML markup only\n"
-            "- Do not escape HTML characters like < or >\n"
-            "- Do not wrap the HTML in quotes or JSON\n"
             "- Do not use markdown code fences\n"
-            "- The first non-whitespace character after ---HTML--- must be <"
+            "- Do not include HTML in this step\n"
+            "- Do not include explanation, audit, or prose before or after the JSON"
+        )
+
+        _VIT_HTML_PROMPT_TMPL = (
+            "You are a presentation slide designer. You will receive a rasterized image of a slide "
+            "as a file attachment plus a structured region specification.\n\n"
+            "Your job is to render faithful, brand-compliant HTML from that region specification. "
+            "Do not invent new regions. Use the supplied regions as the source of truth for layout.\n\n"
+            "Canvas: 1280×720px (16:9), fixed size, no scrolling\n"
+            "Use inline styles or a <style> block. Preserve the original composition and density.\n"
+            "Screenshot-heavy regions must keep their original footprint and hierarchy.\n"
+            "The overall composition should feel like the same slide, not a redesign.\n\n"
+            "Region JSON:\n"
+            "{region_json}\n\n"
+            "Output ---HTML--- and then raw HTML markup only.\n"
+            "Do not wrap the HTML in quotes or JSON.\n"
+            "Do not use markdown code fences.\n"
+            "The first non-whitespace character after ---HTML--- must be <"
         )
 
         def _vit_clean_xml(slide_bytes):
@@ -1682,8 +1697,8 @@ with tab_convert:
         _VIT_RELAY_URL  = "https://anyquest-webhook-relay-production-863f.up.railway.app"
         _VIT_AGENT_SLUG = "prompt-executor-qchksn"
 
-        def _vit_extract_response(raw_text: str) -> tuple[str | None, dict | None]:
-            """Recover region JSON and HTML reliably from relay/model output."""
+        def _vit_extract_regions(raw_text: str) -> dict | None:
+            """Recover region JSON reliably from relay/model output."""
             def _strip_fences(text: str) -> str:
                 text = text.strip()
                 if text.startswith("```"):
@@ -1723,38 +1738,70 @@ with tab_convert:
                         pass
                 return _strip_fences(text)
 
-            _regions = None
             _body = raw_text or ""
             if "---REGIONS---" in _body:
                 _, _, _body = _body.partition("---REGIONS---")
-                if "---HTML---" in _body:
-                    _regions_text, _, _body = _body.partition("---HTML---")
-                    _regions_text = _decode_wrapped_text(_regions_text)
+            _body = _decode_wrapped_text(_body)
+            try:
+                return json.loads(_body)
+            except Exception:
+                _m = re.search(r"\{[\s\S]*\}", _body)
+                if _m:
                     try:
-                        _regions = json.loads(_regions_text)
+                        return json.loads(_m.group(0))
                     except Exception:
-                        _m = re.search(r"\{[\s\S]*\}", _regions_text)
-                        if _m:
-                            try:
-                                _regions = json.loads(_m.group(0))
-                            except Exception:
-                                _regions = None
-                else:
-                    _body = _decode_wrapped_text(_body)
-                    return None, _regions
-            elif "---HTML---" in _body:
+                        return None
+            return None
+
+        def _vit_extract_html(raw_text: str) -> str | None:
+            """Recover HTML reliably from relay/model output."""
+            def _strip_fences(text: str) -> str:
+                text = text.strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text, count=1)
+                    text = re.sub(r"\s*```$", "", text, count=1)
+                return text.strip()
+
+            def _decode_wrapped_text(text: str) -> str:
+                text = _strip_fences(text)
+                for _ in range(2):
+                    _s = text.strip()
+                    if not _s:
+                        break
+                    try:
+                        _parsed = json.loads(_s)
+                    except Exception:
+                        break
+                    if isinstance(_parsed, str):
+                        text = _parsed
+                        continue
+                    if isinstance(_parsed, dict):
+                        for _key in ("html", "content", "result", "output"):
+                            _val = _parsed.get(_key)
+                            if isinstance(_val, str):
+                                text = _val
+                                break
+                        else:
+                            return _s
+                        continue
+                    break
+                if "\\n" in text or "\\t" in text or '\\"' in text:
+                    try:
+                        text = bytes(text, "utf-8").decode("unicode_escape")
+                    except Exception:
+                        pass
+                return _strip_fences(text)
+
+            _body = raw_text or ""
+            if "---HTML---" in _body:
                 _, _, _body = _body.partition("---HTML---")
             _body = _decode_wrapped_text(_body)
-
             if "<" in _body:
-                _body = _body[_body.index("<"):].strip()
-                return _body, _regions
-
+                return _body[_body.index("<"):].strip()
             _match = re.search(r"(<div\b[\s\S]*</div>)", _body, re.IGNORECASE)
             if _match:
-                return _match.group(1).strip(), _regions
-
-            return None, _regions
+                return _match.group(1).strip()
+            return None
 
         def _vit_regions_to_pptx(slide_png_bytes: bytes, region_spec: dict | None) -> bytes | None:
             """Build a simple single-slide PPTX from structured regions."""
@@ -1968,8 +2015,8 @@ with tab_convert:
 
                         _v_png_bytes = _vit_pngs[_vi].read_bytes()
 
-                        _v_prompt = (
-                            _VIT_PROMPT_TMPL
+                        _v_regions_prompt = (
+                            _VIT_REGIONS_PROMPT_TMPL
                             .replace("{n}",            str(_vi + 1))
                             .replace("{total}",        str(_vit_n))
                             .replace("{slide_type}",   "content")
@@ -1977,22 +2024,36 @@ with tab_convert:
                         )
                         st.caption(
                             f"Slide {_vi + 1}: image {len(_v_png_bytes):,}B "
-                            f"prompt {len(_v_prompt):,}c"
+                            f"prompt {len(_v_regions_prompt):,}c"
                         )
 
                         try:
-                            _v_raw  = _vit_call_agent(
-                                _v_prompt,
+                            _v_regions_raw = _vit_call_agent(
+                                _v_regions_prompt,
                                 _v_png_bytes,
                                 image_name=f"slide_{_vi + 1}.png",
                             )
-                            _v_html, _v_regions = _vit_extract_response(_v_raw)
+                            _v_regions = _vit_extract_regions(_v_regions_raw)
+                            _v_html_raw = ""
+                            _v_html = None
+                            if _v_regions:
+                                _v_html_prompt = _VIT_HTML_PROMPT_TMPL.replace(
+                                    "{region_json}",
+                                    json.dumps(_v_regions, indent=2),
+                                )
+                                _v_html_raw = _vit_call_agent(
+                                    _v_html_prompt,
+                                    _v_png_bytes,
+                                    image_name=f"slide_{_vi + 1}.png",
+                                )
+                                _v_html = _vit_extract_html(_v_html_raw)
                             _v_pptx = _vit_regions_to_pptx(_v_png_bytes, _v_regions)
                             if not _v_html:
                                 print(
                                     f"[VIT] Slide {_vi + 1}: could not extract HTML from response",
                                     flush=True,
                                 )
+                            _v_raw = _v_html_raw or _v_regions_raw
                             _v_err  = None
                         except Exception as _v_ae:
                             _v_html = None
