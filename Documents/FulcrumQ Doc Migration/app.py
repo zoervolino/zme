@@ -2209,7 +2209,7 @@ with tab_convert:
                     _vit_grid = st.container()
 
                     for _vi in range(_vit_n):
-                        _vit_status.info(f"⏳ Processing slide {_vi + 1} of {_vit_n}…")
+                        _vit_status.info(f"⏳ Slide {_vi + 1} of {_vit_n}: extracting regions…")
 
                         _v_png_bytes = _vit_pngs[_vi].read_bytes()
 
@@ -2236,6 +2236,7 @@ with tab_convert:
                             _v_html = None
                             _v_refined_layout = None
                             if _v_regions:
+                                _vit_status.info(f"⏳ Slide {_vi + 1} of {_vit_n}: regions received, rendering HTML/layout…")
                                 _v_html_prompt = _VIT_HTML_PROMPT_TMPL.replace(
                                     "{region_json}",
                                     json.dumps(_v_regions, indent=2),
@@ -2246,6 +2247,7 @@ with tab_convert:
                                     image_name=f"slide_{_vi + 1}.png",
                                 )
                                 _v_html, _v_refined_layout = _vit_extract_html_and_layout(_v_html_raw)
+                            _vit_status.info(f"⏳ Slide {_vi + 1} of {_vit_n}: building PPTX preview artifacts…")
                             _v_pptx = _vit_regions_to_pptx(_v_png_bytes, _v_refined_layout or _v_regions)
                             if not _v_html:
                                 print(
@@ -2275,6 +2277,7 @@ with tab_convert:
                             "raw": _v_raw,
                             "err": _v_err,
                         })
+                        _vit_status.info(f"⏳ Slide {_vi + 1} of {_vit_n}: finalizing preview…")
 
                     _vit_status.success(f"✓ Done — {_vit_n} slides processed.")
 
