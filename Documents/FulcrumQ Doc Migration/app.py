@@ -9,6 +9,7 @@ Run:
 import base64
 import contextlib
 import io
+import json
 import re
 import subprocess
 import sys
@@ -1589,7 +1590,13 @@ with tab_convert:
             "- Every content region you identified in the XML\n"
             "- For each region: what you found, what you rendered, and if you simplified or omitted anything — explain exactly why (e.g. 'text was too small to read', 'diagram was too complex to reconstruct accurately', 'could not determine exact values')\n"
             "- Any content you could see but could not reproduce in HTML\n\n"
-            "Then after ---HTML--- output the HTML div as normal. Start your response with ---AUDIT---."
+            "Then after ---HTML--- output the HTML div as normal. Start your response with ---AUDIT---.\n"
+            "CRITICAL OUTPUT FORMAT RULES:\n"
+            "- After ---HTML---, output raw HTML markup only\n"
+            "- Do not escape HTML characters like < or >\n"
+            "- Do not wrap the HTML in quotes or JSON\n"
+            "- Do not use markdown code fences\n"
+            "- The first non-whitespace character after ---HTML--- must be <"
         )
 
         def _vit_clean_xml(slide_bytes):
@@ -1632,46 +1639,138 @@ with tab_convert:
                 raise RuntimeError(f"slide_vision not available: {_ie}")
             return _sv_rasterize(pptx_path, tmp_dir)
 
+        _VIT_RELAY_URL  = "https://anyquest-webhook-relay-production-863f.up.railway.app"
+        _VIT_AGENT_SLUG = "prompt-executor-qchksn"
+
+        def _vit_extract_html(raw_text: str) -> tuple[str | None, str | None]:
+            """Recover HTML reliably from relay/model output."""
+            def _strip_fences(text: str) -> str:
+                text = text.strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text, count=1)
+                    text = re.sub(r"\s*```$", "", text, count=1)
+                return text.strip()
+
+            def _decode_wrapped_text(text: str) -> str:
+                text = _strip_fences(text)
+                # JSON string or quoted payload
+                for _ in range(2):
+                    _s = text.strip()
+                    if not _s:
+                        break
+                    try:
+                        _parsed = json.loads(_s)
+                    except Exception:
+                        break
+                    if isinstance(_parsed, str):
+                        text = _parsed
+                        continue
+                    if isinstance(_parsed, dict):
+                        for _key in ("html", "content", "result", "output"):
+                            _val = _parsed.get(_key)
+                            if isinstance(_val, str):
+                                text = _val
+                                break
+                        else:
+                            return _s
+                        continue
+                    break
+                # Common escaped-text fallback from relay/model wrapping
+                if "\\n" in text or "\\t" in text or '\\"' in text:
+                    try:
+                        text = bytes(text, "utf-8").decode("unicode_escape")
+                    except Exception:
+                        pass
+                return _strip_fences(text)
+
+            _audit = None
+            _body = raw_text or ""
+            if "---HTML---" in _body:
+                _audit, _, _body = _body.partition("---HTML---")
+                _audit = _audit.replace("---AUDIT---", "").strip() or None
+            _body = _decode_wrapped_text(_body)
+
+            if "<" in _body:
+                _body = _body[_body.index("<"):].strip()
+                return _body, _audit
+
+            _match = re.search(r"(<div\b[\s\S]*</div>)", _body, re.IGNORECASE)
+            if _match:
+                return _match.group(1).strip(), _audit
+
+            return None, _audit
+
         def _vit_call_agent(prompt_text, image_bytes, image_name="slide.png"):
-            """Submit prompt plus slide image to Anthropic API and return the response text."""
-            import base64 as _b64
-            import os as _os
-            try:
-                import anthropic as _anthropic
-            except ImportError:
-                raise RuntimeError("anthropic package required: pip install anthropic")
-            _api_key = _os.environ.get("ANTHROPIC_API_KEY")
-            if not _api_key:
-                raise RuntimeError(
-                    "ANTHROPIC_API_KEY environment variable not set."
-                )
-            _client = _anthropic.Anthropic(api_key=_api_key)
-            _msg = _client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=8192,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": _b64.standard_b64encode(image_bytes).decode("utf-8"),
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt_text,
-                        },
-                    ],
-                }],
+            """
+            Submit prompt + slide image to AgentRelay via the Job API.
+            Mirrors _agent_detect_title in convert_deck.py:
+              - POST /submit with agentSlug, Prompt, and image as real file attachment
+              - Poll GET /result/{requestId} until completed
+            """
+            import io as _io
+            import json as _json
+            import time as _time
+            import requests as _req
+            from PIL import Image as _Img
+
+            # Compress to JPEG (smaller payload, matches convert_deck.py)
+            _img = _Img.open(_io.BytesIO(image_bytes))
+            if _img.width > 640:
+                _h = int(_img.height * 640 / _img.width)
+                _img = _img.resize((640, _h), _Img.LANCZOS)
+            _buf = _io.BytesIO()
+            _img.convert("RGB").save(_buf, format="JPEG", quality=70)
+            _buf.seek(0)
+
+            # Submit
+            _resp = _req.post(
+                f"{_VIT_RELAY_URL}/submit",
+                files=[
+                    ("agentId",   (None, "generic-prompt-agent")),
+                    ("Prompt",    (None, prompt_text)),
+                    ("files",     ("slide.jpg", _buf, "image/jpeg")),
+                ],
+                timeout=30,
             )
-            return _msg.content[0].text
+            if not _resp.ok:
+                raise Exception(
+                    f"AgentRelay /submit returned {_resp.status_code}: {_resp.text[:500]}"
+                )
+            _result = _resp.json()
+            if not _result.get("success"):
+                raise Exception(_result.get("error", "Submission failed"))
+
+            _request_id = _result["requestId"]
+
+            # Poll for result
+            _deadline    = _time.time() + 180
+            _last_status = None
+            while _time.time() < _deadline:
+                _poll   = _req.get(f"{_VIT_RELAY_URL}/result/{_request_id}", timeout=10)
+                _data   = _poll.json()
+                _status = _data.get("status", "unknown")
+                if _status != _last_status:
+                    print(
+                        f"[VIT] poll status={_status!r} t={int(120 - (_deadline - _time.time()))}s",
+                        flush=True,
+                    )
+                    _last_status = _status
+                if _status == "completed":
+                    return (
+                        _data.get("content")
+                        or _data.get("result")
+                        or _data.get("output")
+                        or ""
+                    )
+                if _status in ("failed", "not_found"):
+                    raise Exception(f"AgentRelay job {_status}: {_data}")
+                _time.sleep(3)
+
+            raise TimeoutError("AgentRelay: no result after 120s")
 
         # ── UI ────────────────────────────────────────────────────────────────
         st.caption(
-            "Rasterize each slide to PNG, extract structural XML, and render via Claude API. "
+            "Rasterize each slide to PNG, extract structural XML, and render via AgentRelay. "
             "Results stream in slide-by-slide."
         )
 
@@ -1711,25 +1810,10 @@ with tab_convert:
                     _vit_n    = min(len(_vit_pngs), len(_vit_xmls))
                     _vit_grid = st.container()
 
-                    def _vit_resize_png(png_bytes, max_width=640):
-                        """Resize PNG to ≤max_width px wide, aspect-ratio preserved."""
-                        try:
-                            from PIL import Image as _Img
-                            import io as _io
-                            _img = _Img.open(_io.BytesIO(png_bytes))
-                            if _img.width > max_width:
-                                _h = int(_img.height * max_width / _img.width)
-                                _img = _img.resize((max_width, _h), _Img.LANCZOS)
-                            _buf = _io.BytesIO()
-                            _img.save(_buf, format="PNG", optimize=True)
-                            return _buf.getvalue()
-                        except ImportError:
-                            return png_bytes
-
                     for _vi in range(_vit_n):
                         _vit_status.info(f"⏳ Processing slide {_vi + 1} of {_vit_n}…")
 
-                        _v_png_bytes = _vit_resize_png(_vit_pngs[_vi].read_bytes())
+                        _v_png_bytes = _vit_pngs[_vi].read_bytes()
 
                         _v_prompt = (
                             _VIT_PROMPT_TMPL
@@ -1749,22 +1833,21 @@ with tab_convert:
                                 _v_png_bytes,
                                 image_name=f"slide_{_vi + 1}.png",
                             )
-                            if "---HTML---" in _v_raw:
-                                _v_audit, _, _v_html = _v_raw.partition("---HTML---")
-                                _v_audit = _v_audit.replace("---AUDIT---", "").strip()
+                            _v_html, _v_audit = _vit_extract_html(_v_raw)
+                            if _v_audit:
                                 print(
                                     f"\n[VIT] Slide {_vi + 1} audit:\n{_v_audit}\n",
                                     flush=True,
                                 )
-                            else:
+                            if not _v_html:
                                 print(
-                                    f"[VIT] Slide {_vi + 1}: no ---AUDIT--- delimiter found",
+                                    f"[VIT] Slide {_vi + 1}: could not extract HTML from response",
                                     flush=True,
                                 )
-                                _v_html = _v_raw
                             _v_err  = None
                         except Exception as _v_ae:
                             _v_html = None
+                            _v_raw = ""
                             _v_err  = (
                                 "timeout" if "timeout" in str(_v_ae).lower()
                                 else str(_v_ae)
@@ -1776,12 +1859,11 @@ with tab_convert:
                                 _vc1, _vc2 = st.columns(2)
                                 with _vc1:
                                     st.caption("Original")
-                                    _v_png_bytes = _vit_pngs[_vi].read_bytes()
                                     st.image(_v_png_bytes, use_container_width=True)
                                 with _vc2:
                                     st.caption("AI Render")
                                     if _v_html:
-                                        _v_html_clean = _v_html[_v_html.index("<"):] if "<" in _v_html else _v_html
+                                        _v_html_clean = _v_html
                                         _v_shared_style = (
                                             '<style>'
                                             '*{box-sizing:border-box;}'
@@ -1823,10 +1905,19 @@ with tab_convert:
                                             mime="text/html",
                                             key=f"vit_dl_{_vi}",
                                         )
+                                        with st.expander("Raw response", expanded=False):
+                                            st.code(_v_raw[:12000] or "(empty)", language="text")
+                                    elif _v_raw:
+                                        st.warning("Model returned content, but it was not valid raw HTML.")
+                                        with st.expander("Raw response", expanded=True):
+                                            st.code(_v_raw[:12000], language="text")
                                     elif _v_err == "timeout":
                                         st.warning("⏱ API request timed out for this slide.")
                                     else:
                                         st.error(f"Agent error: {_v_err}")
+                                        if _v_raw:
+                                            with st.expander("Raw response", expanded=False):
+                                                st.code(_v_raw[:12000], language="text")
 
                     _vit_status.success(f"✓ Done — {_vit_n} slides processed.")
 
