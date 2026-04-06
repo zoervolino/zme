@@ -1639,14 +1639,16 @@ with tab_convert:
             "The overall composition should feel like the same slide, not a redesign.\n\n"
             "Region JSON:\n"
             "{region_json}\n\n"
-            "First output ---PPTX_LAYOUT--- followed by valid JSON with this schema:\n"
+            "First output ---DESIGN_SPEC--- followed by compact valid JSON with this schema:\n"
             "{\n"
             '  "layout_name": "Content_Light|Content_Light_Sub|Title_Only_Light|Blank_Light",\n'
-            '  "regions": [same schema as input, but refined for final placement]\n'
+            '  "blocks": [same schema as input, but compact and refined for final placement]\n'
             "}\n"
+            "- Keep this JSON compact and final. Only include the blocks actually needed for PPTX placement\n"
             "- Refine spacing, grouping, alignment, and sizing so the slide feels polished and coherent\n"
+            "- Merge or simplify coarse regions when that improves the final composition\n"
             "- Keep screenshot-heavy regions marked preserve_as_image=true when appropriate\n"
-            "- This refined JSON will be used to build native PPTX objects, so improve composition where helpful\n\n"
+            "- This design spec will be used to build native PPTX objects, so improve composition where helpful\n\n"
             "PPTX LAYOUT RULES\n"
             "- Reserve the bottom footer zone for the target master; do not place content in the bottom 48px of the canvas\n"
             "- Do not include a source footer strip or source slide-number badge in the refined layout\n"
@@ -1780,7 +1782,7 @@ with tab_convert:
             return None
 
         def _vit_extract_html_and_layout(raw_text: str) -> tuple[str | None, dict | None]:
-            """Recover HTML and refined pptx layout reliably from relay/model output."""
+            """Recover HTML and compact design spec reliably from relay/model output."""
             def _strip_fences(text: str) -> str:
                 text = text.strip()
                 if text.startswith("```"):
@@ -1820,8 +1822,8 @@ with tab_convert:
 
             _layout = None
             _body = raw_text or ""
-            if "---PPTX_LAYOUT---" in _body:
-                _, _, _body = _body.partition("---PPTX_LAYOUT---")
+            if "---DESIGN_SPEC---" in _body:
+                _, _, _body = _body.partition("---DESIGN_SPEC---")
                 if "---HTML---" in _body:
                     _layout_text, _, _body = _body.partition("---HTML---")
                     _layout_text = _decode_wrapped_text(_layout_text)
@@ -1845,10 +1847,12 @@ with tab_convert:
             return None, _layout
 
         def _vit_regions_to_pptx(slide_png_bytes: bytes, region_spec: dict | None) -> bytes | None:
-            """Build a simple single-slide PPTX from structured regions."""
+            """Build a simple single-slide PPTX from structured regions or compact design spec."""
             if not isinstance(region_spec, dict):
                 return None
             _regions = region_spec.get("regions")
+            if _regions is None:
+                _regions = region_spec.get("blocks")
             if not isinstance(_regions, list) or not _regions:
                 return None
             try:
@@ -2362,9 +2366,9 @@ with tab_convert:
                                 )
                             if _v_refined_layout:
                                 st.download_button(
-                                    label=f"⬇ slide_{_slide_num:02d}_pptx_layout.json",
+                                    label=f"⬇ slide_{_slide_num:02d}_design_spec.json",
                                     data=json.dumps(_v_refined_layout, indent=2).encode("utf-8"),
-                                    file_name=f"slide_{_slide_num:02d}_pptx_layout.json",
+                                    file_name=f"slide_{_slide_num:02d}_design_spec.json",
                                     mime="application/json",
                                     key=f"vit_layout_{_idx}",
                                 )
@@ -2382,7 +2386,7 @@ with tab_convert:
                                 with st.expander("Structured regions", expanded=False):
                                     st.json(_v_regions)
                             if _v_refined_layout:
-                                with st.expander("Refined PPTX layout", expanded=False):
+                                with st.expander("Design spec", expanded=False):
                                     st.json(_v_refined_layout)
                         elif _v_regions or _v_pptx:
                             st.warning(
