@@ -1611,6 +1611,12 @@ with tab_convert:
             "- Regions must describe the major slide structure, not every tiny word\n"
             "- Mark screenshot-heavy or image-heavy regions with preserve_as_image=true\n"
             "- The region list should be sufficient to recreate the slide in native PPTX objects and placed images\n\n"
+            "NORMALIZATION RULES FOR TARGET MASTER\n"
+            "- Do not include legacy source slide-number badges from the top-left; the target master will provide slide numbering\n"
+            "- Do not include legacy footer strips or footer text copied from the source; the target master will provide the footer\n"
+            "- Strip leading slide numbers from the title text\n"
+            "- Title text must be title-cased, not all caps\n"
+            "- Numbered step circles used for section labels should use Pivot Purple (#765FFF), not red, unless they encode true negative/status meaning\n\n"
             "Start your response with ---REGIONS---.\n"
             "CRITICAL OUTPUT FORMAT RULES:\n"
             "- After ---REGIONS---, output valid JSON only\n"
@@ -1638,6 +1644,14 @@ with tab_convert:
             "- Refine spacing, grouping, alignment, and sizing so the slide feels polished and coherent\n"
             "- Keep screenshot-heavy regions marked preserve_as_image=true when appropriate\n"
             "- This refined JSON will be used to build native PPTX objects, so improve composition where helpful\n\n"
+            "PPTX LAYOUT RULES\n"
+            "- Reserve the bottom footer zone for the target master; do not place content in the bottom 48px of the canvas\n"
+            "- Do not include a source footer strip or source slide-number badge in the refined layout\n"
+            "- Strip leading slide numbers from the title and return the title in title case\n"
+            "- Numbered step circles should be Pivot Purple (#765FFF), not red, unless they are true negative/status indicators\n"
+            "- Avoid overlap between regions. Large stat callouts such as $236M in Potential Savings must have their own visible region and must not be clipped or covered\n"
+            "- If there is excess blank vertical space in a column, redistribute regions vertically to create breathing room and prevent crowding near the footer\n"
+            "- Where a diagram panel has unused vertical space, expand or reposition its internal content to use the space more effectively\n\n"
             "Then output ---HTML--- and raw HTML markup only.\n"
             "Do not wrap the HTML in quotes or JSON.\n"
             "Do not use markdown code fences.\n"
@@ -1847,6 +1861,53 @@ with tab_convert:
             def _noneish(val) -> bool:
                 return str(val or "").strip().lower() in {"", "none", "transparent", "null"}
 
+            def _is_redish(val) -> bool:
+                _s = str(val or "").strip().lstrip("#").lower()
+                return _s in {"ea3323", "ff0000", "c00000", "cc0000", "b4000c", "d12b1f", "ec0000"}
+
+            def _strip_leading_slide_number(text: str) -> str:
+                return re.sub(r"^\s*\d+\s*[:.\-\)]?\s*", "", text or "").strip()
+
+            def _is_legacy_title_badge(r: dict) -> bool:
+                try:
+                    _text = str(r.get("text", "") or "").strip()
+                    return (
+                        _text.isdigit()
+                        and int(_text) < 100
+                        and float(r.get("x", 0) or 0) < 90
+                        and float(r.get("y", 0) or 0) < 70
+                        and float(r.get("w", 0) or 0) <= 70
+                        and float(r.get("h", 0) or 0) <= 70
+                    )
+                except Exception:
+                    return False
+
+            def _is_legacy_footer_strip(r: dict) -> bool:
+                try:
+                    _kind = str(r.get("kind", ""))
+                    _text = str(r.get("text", "") or "").lower()
+                    return (
+                        _kind == "footer_strip"
+                        or float(r.get("y", 0) or 0) >= 640
+                        or "all rights reserved" in _text
+                        or "critical roles" in _text
+                    )
+                except Exception:
+                    return False
+
+            def _is_step_badge(r: dict) -> bool:
+                try:
+                    _text = str(r.get("text", "") or "").strip()
+                    return (
+                        _text.isdigit()
+                        and int(_text) < 10
+                        and float(r.get("w", 0) or 0) <= 80
+                        and float(r.get("h", 0) or 0) <= 80
+                        and float(r.get("y", 0) or 0) < 300
+                    )
+                except Exception:
+                    return False
+
             def _region_area(r: dict) -> float:
                 try:
                     return max(0.0, float(r.get("w", 0) or 0)) * max(0.0, float(r.get("h", 0) or 0))
@@ -1854,7 +1915,8 @@ with tab_convert:
                     return 0.0
 
             def _normalize_regions(regions: list[dict]) -> list[dict]:
-                _out = [r for r in regions if isinstance(r, dict)]
+                _out = [dict(r) for r in regions if isinstance(r, dict)]
+                _out = [r for r in _out if not _is_legacy_title_badge(r) and not _is_legacy_footer_strip(r)]
                 if len(_out) > 1:
                     _canvas_area = 1280 * 720
                     _out = [
@@ -1864,6 +1926,32 @@ with tab_convert:
                             and _region_area(r) >= _canvas_area * 0.85
                         )
                     ] or _out
+                _footer_y = 640
+                for r in _out:
+                    _kind = str(r.get("kind", "") or "")
+                    _text = str(r.get("text", "") or "")
+                    if _kind == "title":
+                        r["text"] = cd._to_title_case(_strip_leading_slide_number(_text))
+                    if _is_step_badge(r) and _is_redish(r.get("bg")):
+                        r["bg"] = "#765FFF"
+                        if _noneish(r.get("fg")):
+                            r["fg"] = "#FFFFFF"
+                    try:
+                        _y = float(r.get("y", 0) or 0)
+                        _h = float(r.get("h", 0) or 0)
+                        if _y + _h > _footer_y:
+                            r["y"] = max(0, _footer_y - _h - 8)
+                    except Exception:
+                        pass
+                    if _kind == "stat" or "$" in _text:
+                        try:
+                            _h = float(r.get("h", 0) or 0)
+                            r["h"] = max(_h, 52)
+                            _y = float(r.get("y", 0) or 0)
+                            if _y + float(r["h"]) > _footer_y:
+                                r["y"] = max(0, _footer_y - float(r["h"]) - 8)
+                        except Exception:
+                            pass
                 # Draw image/background regions first, then native regions on top.
                 _out.sort(key=lambda r: (0 if bool(r.get("preserve_as_image")) else 1, _region_area(r)))
                 return _out
