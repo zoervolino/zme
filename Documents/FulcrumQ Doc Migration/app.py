@@ -1617,6 +1617,9 @@ with tab_convert:
             "- Strip leading slide numbers from the title text\n"
             "- Title text must be title-cased, not all caps\n"
             "- Numbered step circles used for section labels should use Pivot Purple (#765FFF), not red, unless they encode true negative/status meaning\n\n"
+            "COPY CLEANUP RULES\n"
+            "- Remove stray spaces before punctuation, e.g. 'Text : example' -> 'Text: example' and 'sentence .' -> 'sentence.'\n"
+            "- Remove repeated spaces\n\n"
             "Start your response with ---REGIONS---.\n"
             "CRITICAL OUTPUT FORMAT RULES:\n"
             "- After ---REGIONS---, output valid JSON only\n"
@@ -1648,6 +1651,7 @@ with tab_convert:
             "- Reserve the bottom footer zone for the target master; do not place content in the bottom 48px of the canvas\n"
             "- Do not include a source footer strip or source slide-number badge in the refined layout\n"
             "- Strip leading slide numbers from the title and return the title in title case\n"
+            "- Remove stray spaces before punctuation and collapse repeated spaces in all returned text\n"
             "- Numbered step circles should be Pivot Purple (#765FFF), not red, unless they are true negative/status indicators\n"
             "- Avoid overlap between regions. Large stat callouts such as $236M in Potential Savings must have their own visible region and must not be clipped or covered\n"
             "- If there is excess blank vertical space in a column, redistribute regions vertically to create breathing room and prevent crowding near the footer\n"
@@ -1868,6 +1872,12 @@ with tab_convert:
             def _strip_leading_slide_number(text: str) -> str:
                 return re.sub(r"^\s*\d+\s*[:.\-\)]?\s*", "", text or "").strip()
 
+            def _cleanup_text(text: str) -> str:
+                text = text or ""
+                text = re.sub(r"\s+([:;.,!?])", r"\1", text)
+                text = re.sub(r"\s{2,}", " ", text)
+                return text.strip()
+
             def _is_legacy_title_badge(r: dict) -> bool:
                 try:
                     _text = str(r.get("text", "") or "").strip()
@@ -1929,9 +1939,10 @@ with tab_convert:
                 _footer_y = 640
                 for r in _out:
                     _kind = str(r.get("kind", "") or "")
-                    _text = str(r.get("text", "") or "")
+                    _text = _cleanup_text(str(r.get("text", "") or ""))
+                    r["text"] = _text
                     if _kind == "title":
-                        r["text"] = cd._to_title_case(_strip_leading_slide_number(_text))
+                        r["text"] = _cleanup_text(cd._to_title_case(_strip_leading_slide_number(_text)))
                     if _is_step_badge(r) and _is_redish(r.get("bg")):
                         r["bg"] = "#765FFF"
                         if _noneish(r.get("fg")):
