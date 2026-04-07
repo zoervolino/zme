@@ -5064,6 +5064,28 @@ def _tbl_cell_text(tc) -> str:
     return "".join(t.text or "" for t in tc.iter(f"{{{NS_A}}}t")).strip()
 
 
+def _is_index_like_table_column(col_texts) -> bool:
+    """True when a short-text column looks like a real row index, not a separator.
+
+    Examples we want to preserve as data tables:
+      ["#", "1", "2", "3"]
+      ["No.", "1", "2", "3"]
+    """
+    vals = [t.strip() for t in col_texts if t and t.strip()]
+    if len(vals) < 2:
+        return False
+    body = vals[1:]
+    if not body:
+        return False
+    if not all(v.isdigit() for v in body):
+        return False
+    nums = [int(v) for v in body]
+    if nums != list(range(nums[0], nums[0] + len(nums))):
+        return False
+    head = vals[0].upper()
+    return head in {"#", "NO", "NO.", "NUM", "NUMBER"} or len(head) <= 2
+
+
 def _classify_table_role(tbl) -> str:
     """Return 'data_table' or 'layout_table' for a <a:tbl> element.
 
@@ -5097,6 +5119,8 @@ def _classify_table_role(tbl) -> str:
 
     # Symbol/arrow column: if any column has every cell containing ≤2 characters
     # it is a separator/indicator column (›, →, ▶, etc.) — marks a layout table.
+    # But do NOT treat a genuine row-index column (#, 1, 2, 3...) as a layout
+    # separator; those occur in real data tables.
     col_count = len(rows[0].findall(f"{{{NS_A}}}tc"))
     for col_i in range(col_count):
         col_cells = []
@@ -5104,7 +5128,12 @@ def _classify_table_role(tbl) -> str:
             tcs = row.findall(f"{{{NS_A}}}tc")
             if col_i < len(tcs):
                 col_cells.append(tcs[col_i])
-        if col_cells and all(len(_tbl_cell_text(tc)) <= 2 for tc in col_cells):
+        col_texts = [_tbl_cell_text(tc) for tc in col_cells]
+        if (
+            col_cells
+            and all(len(txt) <= 2 for txt in col_texts)
+            and not _is_index_like_table_column(col_texts)
+        ):
             return "layout_table"
 
     # No explicit fill on first-row cells: the source did not style row 0 as a
@@ -5205,6 +5234,61 @@ def _style_table_header_rows(slide_root) -> int:
                         rPr.set("sz", "1200")
                     count += 1
 
+    return count
+
+
+def _normalize_dark_filled_table_labels(slide_root) -> int:
+    """Normalize manually filled dark table labels to FulcrumQ purple + white.
+
+    Some source decks use regular tables, not semantic header rows, and simply
+    dark-fill certain label cells by hand. Those should still render as brand
+    header cells even if the table classifier calls the table a layout table.
+    """
+    count = 0
+    for tbl in slide_root.iter(f"{{{NS_A}}}tbl"):
+        for row_idx, row in enumerate(tbl.findall(f"{{{NS_A}}}tr")):
+            for tc in row.findall(f"{{{NS_A}}}tc"):
+                tcPr = tc.find(f"{{{NS_A}}}tcPr")
+                if tcPr is None:
+                    continue
+                sf = tcPr.find(f"{{{NS_A}}}solidFill")
+                if sf is None:
+                    continue
+                srgb = sf.find(f"{{{NS_A}}}srgbClr")
+                fill = (srgb.get("val", "") or "").upper() if srgb is not None else ""
+                if not fill or not _bg_is_dark(fill):
+                    continue
+                text = _tbl_cell_text(tc).strip()
+                if not text:
+                    continue
+
+                words = text.split()
+                headerish = (
+                    row_idx == 0
+                    or len(words) <= 4
+                    or (text.upper() == text and len(text) <= 28)
+                )
+                if not headerish:
+                    continue
+
+                srgb.set("val", _TABLE_HEADER_FILL)
+                for tag in (f"{{{NS_A}}}rPr", f"{{{NS_A}}}defRPr", f"{{{NS_A}}}endParaRPr"):
+                    for rPr in tc.iter(tag):
+                        rPr.set("b", "1")
+                        _set_rpr_color(rPr, _TABLE_HEADER_TEXT)
+                        lat = rPr.find(f"{{{NS_A}}}latin")
+                        if lat is None:
+                            lat = etree.SubElement(rPr, f"{{{NS_A}}}latin")
+                        lat.set("typeface", "Arial")
+                        lat.set("pitchFamily", "34")
+                        lat.set("charset", "0")
+                        try:
+                            current_sz = int(rPr.get("sz", "0"))
+                        except ValueError:
+                            current_sz = 0
+                        if current_sz == 0 or current_sz > 1200:
+                            rPr.set("sz", "1200")
+                        count += 1
     return count
 
 
@@ -6361,6 +6445,10 @@ def convert(source_path: Path, forced_layouts: dict = None):
         n_tbl_hdrs = _style_table_header_rows(slide_root)
         if n_tbl_hdrs:
             print(f"         tbl-hdr  : {n_tbl_hdrs} table header cell(s) styled")
+
+        n_tbl_dark = _normalize_dark_filled_table_labels(slide_root)
+        if n_tbl_dark:
+            print(f"         tbl-dark : {n_tbl_dark} dark table label run(s) normalized")
 
         n_dark_hdrs = _normalize_dark_header_bars(slide_root, slide_w, slide_h)
         if n_dark_hdrs:
