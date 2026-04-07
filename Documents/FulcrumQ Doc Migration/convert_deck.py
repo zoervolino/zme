@@ -2861,6 +2861,14 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         for canon in canonical_norms:
             overlap = _text_overlap_score(norm_txt, canon)
             contains = canon in norm_txt or norm_txt in canon
+            # Keep compact filled section-header bars like "The ASK" or
+            # "The APPROACH" even when the slide title contains those words.
+            has_fill = False
+            spPr = sp.find(f"{{{NS_P}}}spPr")
+            if spPr is not None:
+                has_fill = spPr.find(f"{{{NS_A}}}solidFill") is not None or spPr.find(f"{{{NS_A}}}gradFill") is not None
+            if contains and norm_txt != canon and has_fill and len(norm_txt.split()) <= 4:
+                continue
             if norm_txt == canon or (contains and len(norm_txt) <= max(180, int(len(canon) * 1.25))) or (overlap >= 0.72 and len(norm_txt) <= max(180, int(len(canon) * 1.35))):
                 to_remove.append(sp)
                 break
