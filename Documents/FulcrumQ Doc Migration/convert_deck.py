@@ -1516,6 +1516,10 @@ def remap_chart_colors(file_map):
         except Exception:
             continue
         changed = False
+        is_donut_chart = (
+            root.find(f".//{{{NS_C}}}doughnutChart") is not None
+            or root.find(f".//{{{NS_C}}}holeSize") is not None
+        )
         for srgb in root.iter(f"{{{NS_A}}}srgbClr"):
             v = srgb.get("val", "").upper()
             new_v = _resolve_color(v, set(), semantic_rag=bool(_semantic_rag_bucket(v)))
@@ -1523,6 +1527,21 @@ def remap_chart_colors(file_map):
                 srgb.set("val", new_v)
                 changed = True
                 count += 1
+        if is_donut_chart:
+            for scheme in list(root.iter(f"{{{NS_A}}}schemeClr")):
+                val = (scheme.get("val", "") or "").lower()
+                if val not in {"bg1", "bg2", "lt1", "lt2"}:
+                    continue
+                parent = scheme.getparent()
+                if parent is None or parent.tag != f"{{{NS_A}}}solidFill":
+                    continue
+                # Donut-chart remainder / track slices should stay neutral, not
+                # inherit theme accents or tinted variants.
+                for child in list(parent):
+                    parent.remove(child)
+                repl = etree.SubElement(parent, f"{{{NS_A}}}srgbClr")
+                repl.set("val", "D9D9D9")
+                changed = True
         if changed:
             file_map[key] = etree.tostring(
                 root, xml_declaration=True, encoding="UTF-8", standalone=True)
