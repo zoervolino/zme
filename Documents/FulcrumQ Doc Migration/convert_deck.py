@@ -2776,7 +2776,20 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
 
     # Remove top-of-slide source title fragments even when they are split across
     # shapes or formatted differently than the injected canonical title string.
+    # Preserve compact filled section-header bars like "The ASK" / "The APPROACH";
+    # they are body chrome, not title duplicates.
     for sp in _matching_text_shapes(slide_root, title_text, header_only=True, min_overlap=0.68):
+        norm_txt = _normalize_text_for_match(_shape_text_value(sp))
+        exact_norm_match = bool(title_only_norm and norm_txt == title_only_norm)
+        has_fill = False
+        spPr = sp.find(f"{{{NS_P}}}spPr")
+        if spPr is not None:
+            has_fill = (
+                spPr.find(f"{{{NS_A}}}solidFill") is not None
+                or spPr.find(f"{{{NS_A}}}gradFill") is not None
+            )
+        if has_fill and len(norm_txt.split()) <= 4 and not exact_norm_match:
+            continue
         if sp not in to_remove:
             to_remove.append(sp)
 
@@ -2883,23 +2896,31 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         ph = sp.find(f".//{{{NS_P}}}ph")
         if ph is not None and ph.get("type", "body") == "body" and ph.get("idx") != "12":
             bbox = _shape_bbox(sp)
+            in_top_band = False
             if bbox is not None:
                 _, y, _, cy = bbox
-                if y <= int(0.26 * 6_858_000) and cy <= int(0.22 * 6_858_000):
-                    paras = []
-                    for p in sp.findall(f"./{{{NS_P}}}txBody/{{{NS_A}}}p"):
-                        ptxt = _strip_leading_bullets(
-                            "".join(t.text or "" for t in p.findall(f".//{{{NS_A}}}t"))
-                        ).strip()
-                        pnorm = _normalize_text_for_match(ptxt)
-                        if pnorm:
-                            paras.append(pnorm)
-                    if paras:
-                        has_title_para = bool(title_only_norm and any(p == title_only_norm for p in paras))
-                        has_sub_para = bool(subtitle_only_norm and any(p == subtitle_only_norm for p in paras))
-                        has_combined_para = bool(combined_norm and any(p == combined_norm for p in paras))
-                        if has_combined_para or (subtitle_only_norm and has_title_para and has_sub_para):
-                            to_remove.append(sp)
+                in_top_band = y <= int(0.26 * 6_858_000) and cy <= int(0.22 * 6_858_000)
+            else:
+                # Inherited-geometry placeholders (e.g. body idx=10 from old
+                # masters) often have no xfrm in the slide XML. They are still
+                # safe to remove if their paragraphs exactly mirror the injected
+                # title/subtitle stack.
+                in_top_band = True
+            if in_top_band:
+                paras = []
+                for p in sp.findall(f"./{{{NS_P}}}txBody/{{{NS_A}}}p"):
+                    ptxt = _strip_leading_bullets(
+                        "".join(t.text or "" for t in p.findall(f".//{{{NS_A}}}t"))
+                    ).strip()
+                    pnorm = _normalize_text_for_match(ptxt)
+                    if pnorm:
+                        paras.append(pnorm)
+                if paras:
+                    has_title_para = bool(title_only_norm and any(p == title_only_norm for p in paras))
+                    has_sub_para = bool(subtitle_only_norm and any(p == subtitle_only_norm for p in paras))
+                    has_combined_para = bool(combined_norm and any(p == combined_norm for p in paras))
+                    if has_combined_para or (subtitle_only_norm and has_title_para and has_sub_para):
+                        to_remove.append(sp)
 
     if is_token_only_layout:
         # On token-only layouts, once title/subtitle/date have been accepted we
