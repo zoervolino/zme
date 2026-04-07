@@ -2753,6 +2753,11 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
     # -- Remove old title/subtitle shapes from the slide ----------------------
     title_norm = (title_text    or "").strip().lower()
     sub_norm   = (subtitle_text or "").strip().lower()
+    combined_norm = _normalize_text_for_match(" ".join(
+        part for part in (title_text or "", subtitle_text or "") if part
+    ))
+    title_only_norm = _normalize_text_for_match(title_text or "")
+    subtitle_only_norm = _normalize_text_for_match(subtitle_text or "")
     title_emphasis = _collect_title_emphasis(title_text)
 
     to_remove = []
@@ -2808,11 +2813,6 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
     # Remove legacy header-band placeholders that still carry the old combined
     # title/subtitle stack (often body idx=10 on source masters). Once the
     # canonical title/subtitle placeholders exist, these should not survive.
-    combined_norm = _normalize_text_for_match(" ".join(
-        part for part in (title_text or "", subtitle_text or "") if part
-    ))
-    title_only_norm = _normalize_text_for_match(title_text or "")
-    subtitle_only_norm = _normalize_text_for_match(subtitle_text or "")
     for sp in spTree.findall(f"{{{NS_P}}}sp"):
         if sp in to_remove:
             continue
