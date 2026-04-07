@@ -1040,11 +1040,54 @@ def _extract_header_text_candidates(slide_root) -> list[dict]:
     return cands
 
 
-def _normalize_agent_top_region(parsed: dict | None, slide_root) -> dict | None:
+def _strip_leading_slide_number_from_title(det: dict, slide_root, slide_idx: int) -> dict:
+    """Remove a duplicated leading slide number from the detected title.
+
+    Example: "13 Outcome" on slide 13 should normalize to "Outcome" when the
+    source also contains a separate small top-left slide number badge/object.
+    """
+    if not det or not slide_root or not slide_idx:
+        return det
+    title = str(det.get("title") or "").strip()
+    if not title:
+        return det
+
+    m = re.match(r"^\s*(\d{1,3})\s+(.+?)\s*$", title)
+    if not m:
+        return det
+    num = m.group(1)
+    tail = m.group(2).strip()
+    if not tail or num != str(slide_idx):
+        return det
+
+    # Look for a discrete small header-region object whose text is just the slide number.
+    found_discrete_num = False
+    for cand in _extract_header_text_candidates(slide_root):
+        txt = cand["text"].strip()
+        x, y, cx, cy = cand["bbox"]
+        if txt != num:
+            continue
+        if x > int(0.12 * 12_192_000):
+            continue
+        if y > int(0.10 * 6_858_000):
+            continue
+        if cand["chars"] > 3 or cand["words"] > 1:
+            continue
+        found_discrete_num = True
+        break
+
+    if found_discrete_num:
+        det["title"] = tail
+    return det
+
+
+def _normalize_agent_top_region(parsed: dict | None, slide_root, slide_idx: int = 0) -> dict | None:
     """Stabilize agent title/subtitle roles using deterministic header heuristics."""
     det = _normalize_agent_detection(parsed)
     if det is None or slide_root is None:
         return det
+
+    det = _strip_leading_slide_number_from_title(det, slide_root, slide_idx)
 
     header_cands = _extract_header_text_candidates(slide_root)
     if not header_cands:
@@ -2759,17 +2802,27 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         if ph_type in {"title", "ctrTitle", "subTitle", "dt", "ftr", "sldNum"}:
             continue
         bbox = _shape_bbox(sp)
+        shape_norm = _normalize_text_for_match(_shape_text_value(sp))
+        if not shape_norm:
+            continue
+        contains_title    = title_only_norm    and (title_only_norm    in shape_norm or shape_norm in title_only_norm)
+        contains_subtitle = subtitle_only_norm and subtitle_only_norm in shape_norm
+        contains_combined = combined_norm      and (combined_norm      in shape_norm or shape_norm in combined_norm)
         if bbox is None:
+            # No xfrm — placeholder inherits geometry from the layout.  We can't
+            # position-filter it, but we must remove it if it wholly carries the
+            # title text.  Use a strict token-overlap threshold (≥80 %) so we
+            # don't accidentally delete body content that merely quotes the title.
+            title_tokens  = _token_set(title_text or "")
+            shape_tokens  = _token_set(_shape_text_value(sp))
+            overlap = (len(title_tokens & shape_tokens) / max(1, len(title_tokens))
+                       if title_tokens else 0.0)
+            if overlap >= 0.80 and (contains_title or contains_combined):
+                to_remove.append(sp)
             continue
         _, y, _, cy = bbox
         if y > int(0.20 * 6_858_000) or cy > int(0.16 * 6_858_000):
             continue
-        shape_norm = _normalize_text_for_match(_shape_text_value(sp))
-        if not shape_norm:
-            continue
-        contains_title = title_only_norm and (title_only_norm in shape_norm or shape_norm in title_only_norm)
-        contains_subtitle = subtitle_only_norm and subtitle_only_norm in shape_norm
-        contains_combined = combined_norm and (combined_norm in shape_norm or shape_norm in combined_norm)
         if contains_combined or (contains_title and contains_subtitle) or (contains_title and not subtitle_text):
             to_remove.append(sp)
 
@@ -6014,7 +6067,7 @@ def convert(source_path: Path, forced_layouts: dict = None):
             # Agent title/subtitle detection — runs before resolve_layout so subtitle
             # info can inform layout choice.
             _det        = _agent_detect_title(_slide_pngs[i - 1]) if _slide_pngs and i <= len(_slide_pngs) else None
-            _det        = _normalize_agent_top_region(_det, slide_root) if _det else None
+            _det        = _normalize_agent_top_region(_det, slide_root, slide_idx=i) if _det else None
             _agent_hint = None
             if _det:
                 _agent_hint = _det.get("title")
