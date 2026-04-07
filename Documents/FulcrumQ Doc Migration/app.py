@@ -960,10 +960,25 @@ with tab_convert:
         import importlib as _convert_il
         _convert_cd = _convert_il.reload(cd)
         master_exists = _convert_cd.MASTER_X.exists()
+        _master_layout_count = None
+        if master_exists:
+            try:
+                import zipfile as _convert_zip
+                from lxml import etree as _convert_etree
+                with _convert_zip.ZipFile(_convert_cd.MASTER_X, "r") as _mz:
+                    _rels = _convert_etree.fromstring(
+                        _mz.read("ppt/slideMasters/_rels/slideMaster1.xml.rels")
+                    )
+                _master_layout_count = sum(
+                    1 for _rel in _rels if "slideLayout" in _rel.get("Type", "")
+                )
+            except Exception:
+                _master_layout_count = None
 
         st.caption(
             f"Using converter master/layout engine from `convert_deck.py` with master "
-            f"`{_convert_cd.MASTER_X.name}`."
+            f"`{_convert_cd.MASTER_X.name}`"
+            + (f" ({_master_layout_count} layouts)." if _master_layout_count is not None else ".")
         )
 
         uploaded = st.file_uploader(
