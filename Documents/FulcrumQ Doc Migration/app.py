@@ -908,12 +908,12 @@ _logo_img  = (
     if _logo_b64 else ""
 )
 
-_potx_path   = BASE_DIR / "FulcrumQ_Theme_vF.potx"
+_potx_path   = BASE_DIR / "FulcrumQ Default Template.potx"
 _potx_b64    = base64.b64encode(_potx_path.read_bytes()).decode() if _potx_path.exists() else ""
 _potx_button = (
     f'<a class="fq-hero-dl" '
     f'href="data:application/vnd.openxmlformats-officedocument.presentationml.template;base64,{_potx_b64}" '
-    f'download="FulcrumQ_Template.potx">'
+    f'download="FulcrumQ Default Template.potx">'
     f'<span class="fq-hero-dl-label">Download template</span>'
     f'<span class="fq-hero-dl-name">FulcrumQ Master</span>'
     f'<span class="fq-hero-dl-ext">.POTX</span>'
@@ -949,7 +949,7 @@ tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_semantic, tab_guide
 with tab_convert:
     _cmode = st.radio(
         "_cmode",
-        ["Convert", "Pipeline", "Brand Check", "Visual Ingest Test"],
+        ["Convert", "Visual Ingest Test"],
         horizontal=True,
         label_visibility="collapsed",
     )
