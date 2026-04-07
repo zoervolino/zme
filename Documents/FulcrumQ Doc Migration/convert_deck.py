@@ -5292,7 +5292,7 @@ def style_slide(slide_root, slide_idx=None, layout_name=""):
 # except inside table header rows.
 
 _CEO_WORKS_RE = re.compile(
-    r"CEO[\s.\-_]?WORKS?",
+    r"CEO(?:[\s.\-_])*WORKS?",
     re.IGNORECASE,
 )
 
@@ -5303,19 +5303,40 @@ _CLIENT_LOGO_TITLE_RE = re.compile(
 
 
 def remap_brand_names(slide_root) -> int:
-    """Replace all variants of 'CEO Works' with 'FulcrumQ' in every text run.
+    """Replace all variants of 'CEO Works' with 'FulcrumQ' in slide text.
 
-    Catches: CEO Works, CEO.Works, CEOWORKS, ceo works, CEO-Works, CEOWork, etc.
-    Preserves the surrounding run formatting — only the text node is changed.
-    Returns the count of substitutions made."""
+    Covers text in placeholders, text boxes, grouped shapes, and table cells
+    because all of them ultimately use <a:p>/<a:r>/<a:t> text runs.
+
+    The replacement is paragraph-wide rather than per-run so variants split
+    across multiple runs (e.g. ``CEO.`` + ``WORKS``) are still caught.
+    """
     count = 0
-    for t_el in slide_root.iter(f"{{{NS_A}}}t"):
-        if not t_el.text:
+    for p in slide_root.iter(f"{{{NS_A}}}p"):
+        runs = [r for r in p.findall(f"{{{NS_A}}}r")]
+        if not runs:
             continue
-        new_text, n = _CEO_WORKS_RE.subn("FulcrumQ", t_el.text)
-        if n:
-            t_el.text = new_text
-            count += n
+        texts = []
+        t_nodes = []
+        for r in runs:
+            t_el = r.find(f"{{{NS_A}}}t")
+            if t_el is None:
+                continue
+            t_nodes.append(t_el)
+            texts.append(t_el.text or "")
+        if not t_nodes:
+            continue
+        full = "".join(texts)
+        if not full:
+            continue
+        new_full, n = _CEO_WORKS_RE.subn("FulcrumQ", full)
+        if not n:
+            continue
+        # Preserve paragraph formatting by keeping the first run and clearing the rest.
+        t_nodes[0].text = new_full
+        for extra in t_nodes[1:]:
+            extra.text = ""
+        count += n
     return count
 
 
