@@ -939,8 +939,8 @@ st.markdown(f"""
 <div class="fq-pivot-line"></div>
 """, unsafe_allow_html=True)
 
-_tab_labels = ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  RAG  ", "  Semantic Ingest  ", "  Guided Convert  "]
-tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_semantic, tab_guided = st.tabs(_tab_labels)
+_tab_labels = ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  RAG  ", "  Guided Convert  "]
+tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_guided = st.tabs(_tab_labels)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3036,20 +3036,7 @@ with tab_rag:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 7 — SEMANTIC INGEST
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_semantic:
-    if _HAS_SEMANTIC_INGEST:
-        render_semantic_ingest_tab()
-    else:
-        st.error(
-            "Semantic Ingest tab failed to load. "
-            "Ensure `services/` and `tabs/` are present in the project directory."
-        )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 8 — GUIDED CONVERT
+# TAB 7 — GUIDED CONVERT
 # Upload → rasterize → user designates cover/divider/ending per slide →
 # convert() with forced_layouts → download output PPTX
 # ══════════════════════════════════════════════════════════════════════════════
