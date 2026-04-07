@@ -661,6 +661,8 @@ def detect_semantic_rag_shape_ids(slide_root) -> set[str]:
         if sp_id:
             semantic_ids.add(sp_id)
 
+    semantic_ids |= _small_status_shape_ids(slide_root)
+
     return semantic_ids
 
 
@@ -679,8 +681,16 @@ def _resolve_color(v: str, rag_preserve: set, semantic_rag: bool = False) -> str
     """
     if v in rag_preserve:
         return None
-    if semantic_rag and v in _RAG_REMAP:
-        return _RAG_REMAP[v]
+    if semantic_rag:
+        if v in _RAG_REMAP:
+            return _RAG_REMAP[v]
+        bucket = _semantic_rag_bucket(v)
+        if bucket == "R":
+            return "EA3323"
+        if bucket == "A":
+            return "FFB547"
+        if bucket == "G":
+            return "00C27A"
     if v in COLOR_REMAP:
         return COLOR_REMAP[v]
     if _is_red_hue(v):
@@ -725,6 +735,27 @@ def _hue_bucket(hex_val: str):
     return None
 
 
+def _semantic_rag_bucket(hex_val: str):
+    """Broader RAG bucket detector for semantic/status objects only."""
+    try:
+        r = int(hex_val[0:2], 16) / 255
+        g = int(hex_val[2:4], 16) / 255
+        b = int(hex_val[4:6], 16) / 255
+        h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    except Exception:
+        return None
+    if s < 0.08 or v < 0.35:
+        return None
+    hue = h * 360
+    if hue <= 30 or hue >= 332:
+        return "R"
+    if 31 <= hue <= 72:
+        return "A"
+    if 80 <= hue <= 190:
+        return "G"
+    return None
+
+
 def _sp_has_visible_text(sp) -> bool:
     """Return True if the shape contains at least one non-whitespace text run."""
     for t in sp.iter(f"{{{NS_A}}}t"):
@@ -738,6 +769,16 @@ def _enclosing_sp(element):
     node = element.getparent()
     while node is not None:
         if node.tag == f"{{{NS_P}}}sp":
+            return node
+        node = node.getparent()
+    return None
+
+
+def _enclosing_table(element):
+    """Walk up the parent chain and return the nearest <a:tbl> ancestor, or None."""
+    node = element.getparent()
+    while node is not None:
+        if node.tag == f"{{{NS_A}}}tbl":
             return node
         node = node.getparent()
     return None
@@ -774,6 +815,116 @@ def _grpsp_direct_sp_fills(grpSp):
             continue
         results.append((child, hex_val, (x, y, cx, cy)))
     return results
+
+
+def _gradient_stop_hexes(fill_parent):
+    """Return all explicit gradient stop hexes under a gradFill/ln element."""
+    hexes = []
+    if fill_parent is None:
+        return hexes
+    for gs in fill_parent.findall(f".//{{{NS_A}}}gs"):
+        srgb = gs.find(f"{{{NS_A}}}srgbClr")
+        if srgb is None:
+            srgb = gs.find(f"{{{NS_A}}}solidFill/{{{NS_A}}}srgbClr")
+        if srgb is not None and srgb.get("val"):
+            hexes.append(srgb.get("val", "").upper())
+    return hexes
+
+
+def _shape_type_name(sp) -> str:
+    prst = sp.find(f"./{{{NS_P}}}spPr/{{{NS_A}}}prstGeom")
+    return prst.get("prst", "") if prst is not None else ""
+
+
+def _small_status_shape_ids(slide_root, slide_w: int = 12_192_000, slide_h: int = 6_858_000) -> set[str]:
+    """Detect repeated small status widgets such as legend chips and pills."""
+    candidates = []
+    slide_area = max(1, slide_w * slide_h)
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        sp_id = _shape_id(sp)
+        if not sp_id:
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        x, y, cx, cy = bbox
+        if (cx * cy) > int(0.03 * slide_area):
+            continue
+        if cx < 40_000 or cy < 40_000:
+            continue
+        fill = _shape_fill_hex(sp)
+        if not fill:
+            continue
+        txt = _shape_text(sp).strip()
+        if len(txt) > 32:
+            continue
+        candidates.append({
+            "id": sp_id,
+            "type": _shape_type_name(sp),
+            "bbox": bbox,
+            "bucket": _semantic_rag_bucket(fill),
+        })
+
+    semantic_ids: set[str] = set()
+    for typ in {c["type"] for c in candidates if c["type"]}:
+        typed = [c for c in candidates if c["type"] == typ]
+        if len(typed) < 3:
+            continue
+        cxs = sorted(c["bbox"][2] for c in typed)
+        cys = sorted(c["bbox"][3] for c in typed)
+        med_cx = cxs[len(cxs) // 2]
+        med_cy = cys[len(cys) // 2]
+        if med_cx <= 0 or med_cy <= 0:
+            continue
+        if any(abs(c["bbox"][2] - med_cx) / med_cx > 0.55 for c in typed):
+            continue
+        if any(abs(c["bbox"][3] - med_cy) / med_cy > 0.55 for c in typed):
+            continue
+        buckets = {c["bucket"] for c in typed} - {None}
+        if len(buckets) < 2:
+            continue
+        for c in typed:
+            semantic_ids.add(c["id"])
+    bucketed = [c for c in candidates if c["bucket"] is not None]
+    slide_buckets = {c["bucket"] for c in bucketed}
+    if len(bucketed) >= 3 and len(slide_buckets) >= 2:
+        for c in bucketed:
+            semantic_ids.add(c["id"])
+    return semantic_ids
+
+
+def _semantic_rag_table_ids(slide_root) -> set[int]:
+    """Detect tables whose filled cells act as score/RAG legends."""
+    semantic_tables: set[int] = set()
+    score_re = re.compile(r"\b(score|legend|ready|risk|value|progress|jtbd|q[1-4])\b", re.I)
+    for tbl in slide_root.iter(f"{{{NS_A}}}tbl"):
+        fills = []
+        texts = []
+        colored_cells = 0
+        for tc in tbl.iter(f"{{{NS_A}}}tc"):
+            text = " ".join(
+                "".join(t.text or "" for t in p.findall(f".//{{{NS_A}}}t")).strip()
+                for p in tc.findall(f".//{{{NS_A}}}p")
+            ).strip()
+            if text:
+                texts.append(text)
+            tcPr = tc.find(f"{{{NS_A}}}tcPr")
+            if tcPr is None:
+                continue
+            sf = tcPr.find(f"{{{NS_A}}}solidFill")
+            srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
+            if srgb is None or not srgb.get("val"):
+                continue
+            val = srgb.get("val", "").upper()
+            fills.append(val)
+            if _semantic_rag_bucket(val):
+                colored_cells += 1
+        if not fills:
+            continue
+        buckets = {_semantic_rag_bucket(v) for v in fills} - {None}
+        if colored_cells >= 3 and (len(buckets) >= 2 or score_re.search(" ".join(texts))):
+            semantic_tables.add(id(tbl))
+    return semantic_tables
 
 
 def _shapes_uniform_and_linear(xfrms):
@@ -838,19 +989,7 @@ def _is_rag_gradient_shape(sp):
     gf = spPr.find(f"{{{NS_A}}}gradFill")
     if gf is None:
         return False
-    gsLst = gf.find(f"{{{NS_A}}}gsLst")
-    if gsLst is None:
-        return False
-    buckets = set()
-    for gs in gsLst.findall(f"{{{NS_A}}}gs"):
-        sf = gs.find(f"{{{NS_A}}}solidFill")
-        if sf is None:
-            continue
-        srgb = sf.find(f"{{{NS_A}}}srgbClr")
-        if srgb is not None:
-            b = _hue_bucket(srgb.get("val", ""))
-            if b:
-                buckets.add(b)
+    buckets = {_semantic_rag_bucket(h) for h in _gradient_stop_hexes(gf)} - {None}
     return {"R", "A", "G"} <= buckets
 
 
@@ -894,12 +1033,8 @@ def detect_rag_colors(slide_root):
         if not _is_rag_gradient_shape(sp):
             continue
         spPr = sp.find(f"{{{NS_P}}}spPr")
-        gf   = spPr.find(f"{{{NS_A}}}gradFill")
-        for gs in gf.find(f"{{{NS_A}}}gsLst").findall(f"{{{NS_A}}}gs"):
-            sf   = gs.find(f"{{{NS_A}}}solidFill")
-            srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
-            if srgb is not None:
-                preserve.add(srgb.get("val", "").upper())
+        gf = spPr.find(f"{{{NS_A}}}gradFill")
+        preserve.update(_gradient_stop_hexes(gf))
 
     return preserve
 
@@ -5060,6 +5195,7 @@ def style_slide(slide_root, slide_idx=None, layout_name=""):
     # RAG detection only fires for non-table shapes
     rag_preserve = detect_rag_colors(slide_root)
     semantic_rag_shape_ids = detect_semantic_rag_shape_ids(slide_root)
+    semantic_rag_table_ids = _semantic_rag_table_ids(slide_root)
 
     # ── Shape fill colors ─────────────────────────────────────────────────────
     # Shape backgrounds (spPr > solidFill) use per-slide accent sequencing so
@@ -5082,10 +5218,15 @@ def style_slide(slide_root, slide_idx=None, layout_name=""):
         if skip:
             continue
         v = srgb.get("val", "").upper()
-        if v in rag_preserve:
-            continue
         enc_sp = _enclosing_sp(srgb)
-        semantic_rag = (_shape_id(enc_sp) in semantic_rag_shape_ids) if enc_sp is not None else False
+        enc_tbl = _enclosing_table(srgb)
+        semantic_rag = False
+        if enc_sp is not None and _shape_id(enc_sp) in semantic_rag_shape_ids:
+            semantic_rag = True
+        elif enc_tbl is not None and id(enc_tbl) in semantic_rag_table_ids:
+            semantic_rag = True
+        if v in rag_preserve and not semantic_rag:
+            continue
         mapped = _resolve_color(v, rag_preserve, semantic_rag=semantic_rag)
         if mapped is None:
             continue
