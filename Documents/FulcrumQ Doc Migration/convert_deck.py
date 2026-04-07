@@ -1076,7 +1076,12 @@ def _strip_leading_slide_number_from_title(det: dict, slide_root, slide_idx: int
         found_discrete_num = True
         break
 
-    if found_discrete_num:
+    aggressive_label_re = re.compile(
+        r"^(outcome|output|input|inputs|client context|the client ask|value agenda|build|derive|zoom|ensure)\b",
+        re.IGNORECASE,
+    )
+
+    if found_discrete_num or aggressive_label_re.match(tail):
         det["title"] = tail
     return det
 
