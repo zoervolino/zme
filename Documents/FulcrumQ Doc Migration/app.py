@@ -939,8 +939,145 @@ st.markdown(f"""
 <div class="fq-pivot-line"></div>
 """, unsafe_allow_html=True)
 
-_tab_labels = ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  RAG  ", "  Guided Convert  "]
-tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_guided = st.tabs(_tab_labels)
+
+def _render_guided_convert():
+    st.subheader("Guided Convert")
+    st.caption(
+        "Upload a deck, review slide thumbnails, designate cover / divider / ending slides, "
+        "then convert. All other slides default to Title Only or Sub layout."
+    )
+
+    _gc_upload = st.file_uploader(
+        "Upload source PPTX", type=["pptx"], key="gc_upload"
+    )
+
+    if _gc_upload is not None:
+        import hashlib as _hashlib
+
+        _gc_hash = _hashlib.md5(_gc_upload.getvalue()).hexdigest()
+
+        if st.session_state.get("gc_hash") != _gc_hash:
+            with st.spinner("Rasterizing slides…"):
+                try:
+                    import tempfile as _gc_tf
+                    from slide_vision import rasterize_pptx as _gc_rasterize
+
+                    _gc_tmp_dir = _gc_tf.mkdtemp(prefix="gc_")
+                    _gc_src = Path(_gc_tmp_dir) / _gc_upload.name
+                    _gc_src.write_bytes(_gc_upload.getvalue())
+                    _gc_pngs = _gc_rasterize(_gc_src, Path(_gc_tmp_dir))
+
+                    st.session_state["gc_hash"] = _gc_hash
+                    st.session_state["gc_pngs"] = [p.read_bytes() for p in _gc_pngs]
+                    st.session_state["gc_src_bytes"] = _gc_upload.getvalue()
+                    st.session_state["gc_src_name"] = _gc_upload.name
+                    st.session_state["gc_n"] = len(_gc_pngs)
+                except Exception as _gc_re:
+                    st.error(f"Could not generate slide previews: {_gc_re}")
+                    st.stop()
+
+        _gc_n = st.session_state.get("gc_n", 0)
+        _gc_png_list = st.session_state.get("gc_pngs", [])
+
+        if not _gc_png_list:
+            st.warning("No slide previews available.")
+        else:
+            st.markdown(f"**{_gc_n} slides** — select a type for each:")
+
+            _GC_COLS = 3
+            _gc_designations = {}
+
+            for _gc_row_start in range(0, _gc_n, _GC_COLS):
+                _gc_cols = st.columns(_GC_COLS)
+                for _gc_col_idx in range(_GC_COLS):
+                    _gc_slide_idx = _gc_row_start + _gc_col_idx + 1
+                    if _gc_slide_idx > _gc_n:
+                        break
+                    with _gc_cols[_gc_col_idx]:
+                        st.image(
+                            _gc_png_list[_gc_slide_idx - 1],
+                            caption=f"Slide {_gc_slide_idx}",
+                            use_container_width=True,
+                        )
+                        if _gc_slide_idx == 1:
+                            _gc_default = "cover"
+                        elif _gc_slide_idx == _gc_n:
+                            _gc_default = "ending"
+                        else:
+                            _gc_default = "content"
+
+                        _gc_designations[_gc_slide_idx] = st.selectbox(
+                            f"slide_{_gc_slide_idx}",
+                            ["content", "cover", "divider", "ending"],
+                            index=["content", "cover", "divider", "ending"].index(_gc_default),
+                            key=f"gc_des_{_gc_slide_idx}",
+                            label_visibility="collapsed",
+                        )
+
+            _gc_covers = [i for i, d in _gc_designations.items() if d == "cover"]
+            _gc_endings = [i for i, d in _gc_designations.items() if d == "ending"]
+            _gc_valid = True
+
+            if len(_gc_covers) > 1:
+                st.warning(f"Only 1 cover allowed — slides {_gc_covers} are all marked as cover.")
+                _gc_valid = False
+            if len(_gc_endings) > 1:
+                st.warning(f"Only 1 ending allowed — slides {_gc_endings} are all marked as ending.")
+                _gc_valid = False
+
+            if st.button("Convert", type="primary", key="gc_convert", disabled=not _gc_valid):
+                _gc_layout_map = {
+                    "cover": "Cover_Light",
+                    "divider": "Divider_Dark",
+                    "ending": "Ending_PivotPurple",
+                }
+                _gc_forced = {
+                    idx: _gc_layout_map[des]
+                    for idx, des in _gc_designations.items()
+                    if des in _gc_layout_map
+                }
+
+                with st.spinner("Converting…"):
+                    try:
+                        import tempfile as _gc_tf2
+                        import convert_deck as _gc_cd
+                        import importlib as _gc_il
+
+                        _gc_tmp2 = _gc_tf2.mkdtemp(prefix="gc_out_")
+                        _gc_src2 = Path(_gc_tmp2) / st.session_state["gc_src_name"]
+                        _gc_src2.write_bytes(st.session_state["gc_src_bytes"])
+
+                        _gc_il.reload(_gc_cd)
+
+                        _gc_out = _gc_cd.convert(_gc_src2, forced_layouts=_gc_forced)
+                        _gc_out_bytes = _gc_out.read_bytes()
+
+                        st.success(f"Done — {len(_gc_out_bytes):,} bytes")
+                        st.download_button(
+                            label="⬇ Download converted PPTX",
+                            data=_gc_out_bytes,
+                            file_name=_gc_out.name,
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            key="gc_download",
+                        )
+
+                        st.markdown("**Layout selection summary:**")
+                        _gc_summary = []
+                        for _si, _des in _gc_designations.items():
+                            _forced_name = _gc_forced.get(_si, "—")
+                            _gc_summary.append(f"| {_si} | {_des} | {_forced_name} |")
+                        st.markdown(
+                            "| Slide | Designation | Forced Layout |\n"
+                            "|---|---|---|\n" + "\n".join(_gc_summary)
+                        )
+
+                    except Exception as _gc_e:
+                        st.error(f"Conversion failed: {_gc_e}")
+                        import traceback as _gc_tb
+                        st.code(_gc_tb.format_exc())
+
+_tab_labels = ["  Convert  ", "  Color Palette  ", "  Logo Suite  ", "  Icons  ", "  RAG  "]
+tab_convert, tab_palette, tab_logos, tab_icons, tab_rag = st.tabs(_tab_labels)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -949,7 +1086,7 @@ tab_convert, tab_palette, tab_logos, tab_icons, tab_rag, tab_guided = st.tabs(_t
 with tab_convert:
     _cmode = st.radio(
         "_cmode",
-        ["Convert", "Visual Ingest Test"],
+        ["Convert", "Guided Convert", "Visual Ingest Test"],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -1478,6 +1615,10 @@ with tab_convert:
                                         '<span style="font-size:11px;color:var(--fq-green);">None ✓</span>',
                                         unsafe_allow_html=True,
                                     )
+
+    # ── Visual Ingest Test mode ────────────────────────────────────────────────
+    elif _cmode == "Guided Convert":
+        _render_guided_convert()
 
     # ── Visual Ingest Test mode ────────────────────────────────────────────────
     elif _cmode == "Visual Ingest Test":
@@ -3034,154 +3175,3 @@ with tab_rag:
         )
     st.markdown(header + rows_html + "</tbody></table>", unsafe_allow_html=True)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 7 — GUIDED CONVERT
-# Upload → rasterize → user designates cover/divider/ending per slide →
-# convert() with forced_layouts → download output PPTX
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_guided:
-    st.subheader("Guided Convert")
-    st.caption(
-        "Upload a deck, review slide thumbnails, designate cover / divider / ending slides, "
-        "then convert. All other slides default to Title Only or Sub layout."
-    )
-
-    _gc_upload = st.file_uploader(
-        "Upload source PPTX", type=["pptx"], key="gc_upload"
-    )
-
-    if _gc_upload is not None:
-        import hashlib as _hashlib
-
-        _gc_hash = _hashlib.md5(_gc_upload.getvalue()).hexdigest()
-
-        # ── Rasterize once per file (cached in session state) ─────────────────
-        if st.session_state.get("gc_hash") != _gc_hash:
-            with st.spinner("Rasterizing slides…"):
-                try:
-                    import tempfile as _gc_tf
-                    from slide_vision import rasterize_pptx as _gc_rasterize
-
-                    _gc_tmp_dir = _gc_tf.mkdtemp(prefix="gc_")
-                    _gc_src = Path(_gc_tmp_dir) / _gc_upload.name
-                    _gc_src.write_bytes(_gc_upload.getvalue())
-                    _gc_pngs = _gc_rasterize(_gc_src, Path(_gc_tmp_dir))
-
-                    st.session_state["gc_hash"]    = _gc_hash
-                    st.session_state["gc_pngs"]    = [p.read_bytes() for p in _gc_pngs]
-                    st.session_state["gc_src_bytes"] = _gc_upload.getvalue()
-                    st.session_state["gc_src_name"]  = _gc_upload.name
-                    st.session_state["gc_n"]       = len(_gc_pngs)
-                except Exception as _gc_re:
-                    st.error(f"Could not generate slide previews: {_gc_re}")
-                    st.stop()
-
-        _gc_n        = st.session_state.get("gc_n", 0)
-        _gc_png_list = st.session_state.get("gc_pngs", [])
-
-        if not _gc_png_list:
-            st.warning("No slide previews available.")
-        else:
-            st.markdown(f"**{_gc_n} slides** — select a type for each:")
-
-            # ── Thumbnail grid (3 columns) ────────────────────────────────────
-            _GC_COLS = 3
-            _gc_designations = {}
-
-            for _gc_row_start in range(0, _gc_n, _GC_COLS):
-                _gc_cols = st.columns(_GC_COLS)
-                for _gc_col_idx in range(_GC_COLS):
-                    _gc_slide_idx = _gc_row_start + _gc_col_idx + 1
-                    if _gc_slide_idx > _gc_n:
-                        break
-                    with _gc_cols[_gc_col_idx]:
-                        st.image(
-                            _gc_png_list[_gc_slide_idx - 1],
-                            caption=f"Slide {_gc_slide_idx}",
-                            use_container_width=True,
-                        )
-                        # Default: slide 1 → cover, last slide → ending, rest → content
-                        if _gc_slide_idx == 1:
-                            _gc_default = "cover"
-                        elif _gc_slide_idx == _gc_n:
-                            _gc_default = "ending"
-                        else:
-                            _gc_default = "content"
-
-                        _gc_designations[_gc_slide_idx] = st.selectbox(
-                            f"slide_{_gc_slide_idx}",
-                            ["content", "cover", "divider", "ending"],
-                            index=["content", "cover", "divider", "ending"].index(_gc_default),
-                            key=f"gc_des_{_gc_slide_idx}",
-                            label_visibility="collapsed",
-                        )
-
-            # ── Validation ────────────────────────────────────────────────────
-            _gc_covers  = [i for i, d in _gc_designations.items() if d == "cover"]
-            _gc_endings = [i for i, d in _gc_designations.items() if d == "ending"]
-            _gc_valid   = True
-
-            if len(_gc_covers) > 1:
-                st.warning(f"Only 1 cover allowed — slides {_gc_covers} are all marked as cover.")
-                _gc_valid = False
-            if len(_gc_endings) > 1:
-                st.warning(f"Only 1 ending allowed — slides {_gc_endings} are all marked as ending.")
-                _gc_valid = False
-
-            # ── Convert button ────────────────────────────────────────────────
-            if st.button("Convert", type="primary", key="gc_convert", disabled=not _gc_valid):
-                # Build forced_layouts — only non-content slides get forced
-                _gc_layout_map = {
-                    "cover":   "Cover_Light",
-                    "divider": "Divider_Dark",
-                    "ending":  "Ending_PivotPurple",
-                }
-                _gc_forced = {
-                    idx: _gc_layout_map[des]
-                    for idx, des in _gc_designations.items()
-                    if des in _gc_layout_map
-                }
-
-                with st.spinner("Converting…"):
-                    try:
-                        import tempfile as _gc_tf2
-                        import convert_deck as _gc_cd
-
-                        _gc_tmp2   = _gc_tf2.mkdtemp(prefix="gc_out_")
-                        _gc_src2   = Path(_gc_tmp2) / st.session_state["gc_src_name"]
-                        _gc_src2.write_bytes(st.session_state["gc_src_bytes"])
-
-                        # Reload module to pick up any live edits
-                        import importlib as _gc_il
-                        _gc_il.reload(_gc_cd)
-
-                        _gc_out = _gc_cd.convert(_gc_src2, forced_layouts=_gc_forced)
-                        _gc_out_bytes = _gc_out.read_bytes()
-
-                        st.success(f"Done — {len(_gc_out_bytes):,} bytes")
-                        st.download_button(
-                            label="⬇ Download converted PPTX",
-                            data=_gc_out_bytes,
-                            file_name=_gc_out.name,
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                            key="gc_download",
-                        )
-
-                        # Layout summary table
-                        st.markdown("**Layout selection summary:**")
-                        _gc_summary = []
-                        for _si, _des in _gc_designations.items():
-                            _forced_name = _gc_forced.get(_si, "—")
-                            _gc_summary.append(
-                                f"| {_si} | {_des} | {_forced_name} |"
-                            )
-                        st.markdown(
-                            "| Slide | Designation | Forced Layout |\n"
-                            "|---|---|---|\n" + "\n".join(_gc_summary)
-                        )
-
-                    except Exception as _gc_e:
-                        st.error(f"Conversion failed: {_gc_e}")
-                        import traceback as _gc_tb
-                        st.code(_gc_tb.format_exc())

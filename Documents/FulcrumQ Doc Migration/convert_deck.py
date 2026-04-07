@@ -2019,7 +2019,12 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
     Dark variants follow the same rules (preserve Dark when explicitly dark).
     Content_Light / 1_Content_Dark are never selected — use Title_Only or Sub variants.
     """
+    is_dark = _bg_is_dark(_slide_bg_hex(slide_root)) if slide_root is not None else False
+
     # ── Step 1: exact name match ───────────────────────────────────────────────
+    normalized_old = _normalize_recommended_layout(old_name, v7_name_map, is_dark=is_dark)
+    if normalized_old in v7_name_map and normalized_old != old_name:
+        return v7_name_map[normalized_old], f"exact-normalized → {normalized_old}"
     if old_name in v7_name_map:
         return v7_name_map[old_name], "exact"
 
@@ -2050,7 +2055,6 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
     # Exceptions: Dividers, Endings, and Covers are still detected structurally.
     if agent_hint is not None and slide_root is not None:
         m = _scan_slide_content(slide_root)
-        is_dark = _bg_is_dark(_slide_bg_hex(slide_root))
         rec_layout = _normalize_recommended_layout(
             agent_hint.get("recommended_layout"), v7_name_map, is_dark=is_dark
         )
@@ -2859,17 +2863,16 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
             continue
 
         for canon in canonical_norms:
-            overlap = _text_overlap_score(norm_txt, canon)
-            contains = canon in norm_txt or norm_txt in canon
+            exact_norm_match = norm_txt == canon
             # Keep compact filled section-header bars like "The ASK" or
             # "The APPROACH" even when the slide title contains those words.
             has_fill = False
             spPr = sp.find(f"{{{NS_P}}}spPr")
             if spPr is not None:
                 has_fill = spPr.find(f"{{{NS_A}}}solidFill") is not None or spPr.find(f"{{{NS_A}}}gradFill") is not None
-            if contains and norm_txt != canon and has_fill and len(norm_txt.split()) <= 4:
+            if has_fill and len(norm_txt.split()) <= 4 and not exact_norm_match:
                 continue
-            if norm_txt == canon or (contains and len(norm_txt) <= max(180, int(len(canon) * 1.25))) or (overlap >= 0.72 and len(norm_txt) <= max(180, int(len(canon) * 1.35))):
+            if exact_norm_match:
                 to_remove.append(sp)
                 break
 
@@ -4989,6 +4992,11 @@ _CEO_WORKS_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CLIENT_LOGO_TITLE_RE = re.compile(
+    r"^(our|select|representative)?\s*clients?$",
+    re.IGNORECASE,
+)
+
 
 def remap_brand_names(slide_root) -> int:
     """Replace all variants of 'CEO Works' with 'FulcrumQ' in every text run.
@@ -5005,6 +5013,31 @@ def remap_brand_names(slide_root) -> int:
             t_el.text = new_text
             count += n
     return count
+
+
+def _slide_preserves_client_logos(slide_root) -> bool:
+    """True when the slide title suggests a client-logo wall/reference page."""
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle"}:
+            title = _shape_text(sp).strip()
+            if title and _CLIENT_LOGO_TITLE_RE.fullmatch(title):
+                return True
+    # Fallback for decks without a real title placeholder: check the first
+    # high-level title-like text near the top band.
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        if sp.find(f".//{{{NS_P}}}ph") is not None:
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        _, y, _, cy = bbox
+        if y > int(0.16 * 6_858_000) or cy > int(0.14 * 6_858_000):
+            continue
+        text = _shape_text(sp).strip()
+        if text and _CLIENT_LOGO_TITLE_RE.fullmatch(text):
+            return True
+    return False
 
 
 def normalize_alignment(slide_root):
@@ -5286,8 +5319,8 @@ def _normalize_dark_filled_table_labels(slide_root) -> int:
                             current_sz = int(rPr.get("sz", "0"))
                         except ValueError:
                             current_sz = 0
-                        if current_sz == 0 or current_sz > 1200:
-                            rPr.set("sz", "1200")
+                        if current_sz == 0 or current_sz < 1400:
+                            rPr.set("sz", "1400")
                         count += 1
     return count
 
@@ -5459,6 +5492,17 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
             continue
         candidate_font = _shape_font_size(sp)
         candidate_words = len(txt.split())
+        spPr = sp.find(f"{{{NS_P}}}spPr")
+        has_fill = False
+        if spPr is not None:
+            has_fill = (
+                spPr.find(f"{{{NS_A}}}solidFill") is not None or
+                spPr.find(f"{{{NS_A}}}gradFill") is not None
+            )
+
+        # Preserve compact filled section bars like "The ASK" / "The APPROACH".
+        if has_fill and candidate_words <= 4 and len(txt) <= 36:
+            continue
 
         matched = False
         for item in canonical:
@@ -5468,16 +5512,6 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
                     if candidate_words <= 5 and len(txt) <= max(48, len(item["text"]) + 12):
                         matched = True
                         break
-            overlap = _text_overlap_score(norm_txt, item["norm"])
-            contains = item["norm"] in norm_txt or norm_txt in item["norm"]
-            if overlap < 0.72 and not contains:
-                continue
-            if item["y"] is not None and y > item["y"] + int(0.10 * 6_858_000):
-                continue
-            if item["kind"] == "title" and candidate_font and item["font"] and candidate_font > int(item["font"] * 1.10):
-                continue
-            matched = True
-            break
         if not matched:
             continue
 
@@ -6094,6 +6128,123 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
     return count
 
 
+def _contrast_free_text_against_nearest_fill(
+    slide_root,
+    rag_preserve: set,
+    slide_w: int = 12_192_000,
+    slide_h: int = 6_858_000,
+) -> int:
+    """Contrast-correct free text boxes against the nearest filled shape on slide."""
+    count = 0
+
+    def _contains_point(bb, px, py) -> bool:
+        x, y, cx, cy = bb
+        return x <= px <= x + cx and y <= py <= y + cy
+
+    fill_candidates = []
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        fill = _shape_fill_hex(sp)
+        bb = _shape_bbox(sp)
+        if not fill or not bb or fill in rag_preserve:
+            continue
+        text = _sp_text_content(sp)
+        if text and _normalize_text_for_match(text):
+            continue
+        fill_candidates.append((fill, bb, bb[2] * bb[3]))
+
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        if sp.find(f".//{{{NS_P}}}ph") is not None:
+            continue
+        text = _sp_text_content(sp)
+        if not text or _shape_fill_hex(sp):
+            continue
+        bb = _shape_bbox(sp)
+        if bb is None:
+            continue
+        x, y, cx, cy = bb
+        if y < int(0.14 * slide_h) or cy > int(0.40 * slide_h):
+            continue
+        if not _normalize_text_for_match(text):
+            continue
+
+        explicit_colors = []
+        for rPr in sp.iter(f"{{{NS_A}}}rPr"):
+            sf = rPr.find(f"{{{NS_A}}}solidFill")
+            srgb = sf.find(f"{{{NS_A}}}srgbClr") if sf is not None else None
+            if srgb is not None and srgb.get("val"):
+                explicit_colors.append(srgb.get("val", "").upper())
+        if explicit_colors and all(c in _FONT_ACCENT_PRESERVE for c in explicit_colors):
+            continue
+
+        cx_mid = x + cx // 2
+        cy_mid = y + cy // 2
+        chosen_fill = None
+        chosen_area = None
+        chosen_center = False
+        for fill, fbb, area in fill_candidates:
+            fx, fy, fcx, fcy = fbb
+            overlaps = x < fx + fcx and x + cx > fx and y < fy + fcy and y + cy > fy
+            contains = x >= fx and y >= fy and (x + cx) <= (fx + fcx) and (y + cy) <= (fy + fcy)
+            center_hit = _contains_point(fbb, cx_mid, cy_mid)
+            if not overlaps:
+                continue
+            if chosen_fill is None:
+                chosen_fill = fill
+                chosen_area = area
+                chosen_center = center_hit
+            elif center_hit and not chosen_center:
+                chosen_fill = fill
+                chosen_area = area
+                chosen_center = True
+            elif center_hit == chosen_center and (
+                (contains and (chosen_area is None or area < chosen_area))
+                or (chosen_area is not None and area < chosen_area)
+            ):
+                chosen_fill = fill
+                chosen_area = area
+                chosen_center = center_hit
+
+        if chosen_fill is None:
+            continue
+        want = "FFFFFF" if _bg_is_dark(chosen_fill) else "1D1D1D"
+        count += _set_text_color_preserving_emphasis(sp, want, rag_preserve)
+
+    return count
+
+
+def _normalize_free_body_text_boxes(slide_root, slide_h: int = 6_858_000) -> int:
+    """Force surviving body-style free text boxes to use Arial."""
+    count = 0
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        if sp.find(f".//{{{NS_P}}}ph") is not None:
+            continue
+        text = _sp_text_content(sp).strip()
+        if not text:
+            continue
+        bb = _shape_bbox(sp)
+        if bb is None:
+            continue
+        _, y, _, cy = bb
+        if y < _TITLE_REGION_EMU or cy < int(0.08 * slide_h):
+            continue
+        if len(text) < 40 and len(text.split()) < 8:
+            continue
+        if _shape_fill_hex(sp) and cy <= int(0.10 * slide_h):
+            continue
+        for tag in (f"{{{NS_A}}}rPr", f"{{{NS_A}}}endParaRPr", f"{{{NS_A}}}defRPr"):
+            for rPr in sp.iter(tag):
+                lat = rPr.find(f"{{{NS_A}}}latin")
+                if lat is None:
+                    lat = etree.SubElement(rPr, f"{{{NS_A}}}latin")
+                    _stamp(lat, "Arial")
+                    count += 1
+                    continue
+                if lat.get("typeface", "").startswith("+") or lat.get("typeface") != "Arial":
+                    _stamp(lat, "Arial")
+                    count += 1
+    return count
+
+
 # ── Text box margin pass ──────────────────────────────────────────────────────
 TXBOX_INS_LR = 91440   # 0.10 inch in EMU  (lIns / rIns on <a:bodyPr>)
 TXBOX_INS_TB = 45720   # 0.05 inch in EMU  (tIns / bIns on <a:bodyPr>)
@@ -6436,9 +6587,13 @@ def convert(source_path: Path, forced_layouts: dict = None):
         n_names = remap_brand_names(slide_root)
         if n_names:
             print(f"         renamed  : {n_names} 'CEO Works' → 'FulcrumQ'")
-        n_logos = _swap_corner_logos(slide_root, file_map, spath, slide_w, slide_h)
-        if n_logos:
-            print(f"         logos    : {n_logos} corner logo(s) swapped")
+        preserve_client_logos = _slide_preserves_client_logos(slide_root)
+        if preserve_client_logos:
+            print("         logos    : preserved (client-logo slide)")
+        else:
+            n_logos = _swap_corner_logos(slide_root, file_map, spath, slide_w, slide_h)
+            if n_logos:
+                print(f"         logos    : {n_logos} corner logo(s) swapped")
         n_fonts, n_colors, n_cased = style_slide(slide_root, slide_idx=i, layout_name=v7_layout_name)
         total_fonts  += n_fonts
         total_colors += n_colors
@@ -6461,9 +6616,12 @@ def convert(source_path: Path, forced_layouts: dict = None):
         if n_bullets:
             print(f"         bullets  : {n_bullets} paragraph(s) normalised")
 
-        n_pics = recolor_pics(slide_root, file_map=file_map, slide_path=spath, slide_w=slide_w, slide_h=slide_h)
-        if n_pics:
-            print(f"         recolored: {n_pics} picture(s) → brand palette")
+        if preserve_client_logos:
+            n_pics = 0
+        else:
+            n_pics = recolor_pics(slide_root, file_map=file_map, slide_path=spath, slide_w=slide_w, slide_h=slide_h)
+            if n_pics:
+                print(f"         recolored: {n_pics} picture(s) → brand palette")
 
         # Restore overlay fills to their pre-remap values
         n_restored = restore_screenshot_overlays(slide_root)
@@ -6498,6 +6656,15 @@ def convert(source_path: Path, forced_layouts: dict = None):
         n_grp = style_compound_groups(slide_root, detect_rag_colors(slide_root))
         if n_grp:
             print(f"         grp-style: {n_grp} group text run(s) contrasted")
+
+        n_free_contrast = _contrast_free_text_against_nearest_fill(
+            slide_root, detect_rag_colors(slide_root), slide_w, slide_h)
+        if n_free_contrast:
+            print(f"         free-contrast: {n_free_contrast} free text run(s) contrasted")
+
+        n_free_body = _normalize_free_body_text_boxes(slide_root, slide_h)
+        if n_free_body:
+            print(f"         free-body: {n_free_body} free text run(s) stamped Arial")
 
         file_map[spath] = etree.tostring(
             slide_root, xml_declaration=True, encoding="UTF-8", standalone=True)
