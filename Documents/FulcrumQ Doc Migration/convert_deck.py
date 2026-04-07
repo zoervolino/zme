@@ -1090,7 +1090,7 @@ def _normalize_agent_top_region(parsed: dict | None, slide_root) -> dict | None:
             det["subtitle"] = heading["text"].strip()
             det["subtitle_present"] = True
             if not det.get("recommended_layout") or "sub" not in str(det.get("recommended_layout", "")).lower():
-                det["recommended_layout"] = "Content_Light_Sub"
+                det["recommended_layout"] = "Light_Sub"
             return det
 
     # Combined title returned by agent even though a discrete short label exists above.
@@ -1108,7 +1108,7 @@ def _normalize_agent_top_region(parsed: dict | None, slide_root) -> dict | None:
                     det["title"] = label["text"].strip()
                     det["subtitle"] = cand["text"].strip()
                     det["subtitle_present"] = True
-                    det["recommended_layout"] = "Content_Light_Sub"
+                    det["recommended_layout"] = "Light_Sub"
                     break
 
     return det
