@@ -5936,6 +5936,10 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
     """
     count = 0
 
+    def _contains_point(bb, px, py) -> bool:
+        x, y, cx, cy = bb
+        return x <= px <= x + cx and y <= py <= y + cy
+
     for grpSp in slide_root.iter(f"{{{NS_P}}}grpSp"):
         group_sps = list(grpSp.iter(f"{{{NS_P}}}sp"))
         if not group_sps:
@@ -5995,8 +5999,11 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
                 if lbb is None:
                     continue
                 lx, ly, lcx, lcy = lbb
+                lcx_mid = lx + lcx // 2
+                lcy_mid = ly + lcy // 2
                 chosen_fill = None
                 chosen_area = None
+                chosen_center = False
                 for bg_sp, bg_fill in bg_shapes:
                     if not bg_fill or bg_fill in rag_preserve:
                         continue
@@ -6006,14 +6013,28 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
                     bx, by, bcx, bcy = bbb
                     overlaps = lx < bx + bcx and lx + lcx > bx and ly < by + bcy and ly + lcy > by
                     contains = lx >= bx and ly >= by and (lx + lcx) <= (bx + bcx) and (ly + lcy) <= (by + bcy)
+                    center_hit = _contains_point(bbb, lcx_mid, lcy_mid)
                     if not overlaps:
                         continue
                     area = bcx * bcy
-                    # Prefer the smallest containing/overlapping background so
-                    # labels on light inner faces don't inherit a dark outer band.
-                    if chosen_fill is None or (contains and (chosen_area is None or area < chosen_area)) or (chosen_area is not None and area < chosen_area):
+                    # Prefer backgrounds whose face contains the label center; this
+                    # is more reliable for nested hex/card interiors than pure bbox
+                    # overlap, which can accidentally choose a dark border/band.
+                    if chosen_fill is None:
                         chosen_fill = bg_fill
                         chosen_area = area
+                        chosen_center = center_hit
+                    elif center_hit and not chosen_center:
+                        chosen_fill = bg_fill
+                        chosen_area = area
+                        chosen_center = True
+                    elif center_hit == chosen_center and (
+                        (contains and (chosen_area is None or area < chosen_area))
+                        or (chosen_area is not None and area < chosen_area)
+                    ):
+                        chosen_fill = bg_fill
+                        chosen_area = area
+                        chosen_center = center_hit
                 if chosen_fill is None:
                     continue
                 tc = "FFFFFF" if _bg_is_dark(chosen_fill) else "1D1D1D"
@@ -6038,17 +6059,33 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
             if tbb is None:
                 continue
             tx, ty, tcx, tcy = tbb
+            tcx_mid = tx + tcx // 2
+            tcy_mid = ty + tcy // 2
             chosen_fill = None
             chosen_area = None
+            chosen_center = False
             for fsp, fill, fbb, area in fill_candidates:
                 fx, fy, fcx, fcy = fbb
                 overlaps = tx < fx + fcx and tx + tcx > fx and ty < fy + fcy and ty + tcy > fy
                 contains = tx >= fx and ty >= fy and (tx + tcx) <= (fx + fcx) and (ty + tcy) <= (fy + fcy)
+                center_hit = _contains_point(fbb, tcx_mid, tcy_mid)
                 if not overlaps:
                     continue
-                if chosen_fill is None or (contains and (chosen_area is None or area < chosen_area)) or (chosen_area is not None and area < chosen_area):
+                if chosen_fill is None:
                     chosen_fill = fill
                     chosen_area = area
+                    chosen_center = center_hit
+                elif center_hit and not chosen_center:
+                    chosen_fill = fill
+                    chosen_area = area
+                    chosen_center = True
+                elif center_hit == chosen_center and (
+                    (contains and (chosen_area is None or area < chosen_area))
+                    or (chosen_area is not None and area < chosen_area)
+                ):
+                    chosen_fill = fill
+                    chosen_area = area
+                    chosen_center = center_hit
             if chosen_fill is None:
                 continue
             tc = "FFFFFF" if _bg_is_dark(chosen_fill) else "1D1D1D"
