@@ -2826,6 +2826,40 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         if contains_combined or (contains_title and contains_subtitle) or (contains_title and not subtitle_text):
             to_remove.append(sp)
 
+    # Final deterministic cleanup: after canonical title/subtitle injection,
+    # any surviving top-band source text duplicating the canonical text is no
+    # longer needed, even if it lives in a grouped child or body placeholder.
+    def _strip_leading_bullets(text: str) -> str:
+        return re.sub(r"^\s*[-•·*–—]+\s*", "", text or "").strip()
+
+    canonical_norms = [n for n in (title_only_norm, subtitle_only_norm, combined_norm) if n]
+    for sp in list(slide_root.iter(f"{{{NS_P}}}sp")):
+        if sp in to_remove:
+            continue
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle", "subTitle", "dt", "ftr", "sldNum"}:
+            continue
+        txt = _strip_leading_bullets(_shape_text_value(sp))
+        if not txt:
+            continue
+        norm_txt = _normalize_text_for_match(txt)
+        if not norm_txt:
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is not None:
+            _, y, _, cy = bbox
+            if y > int(0.22 * 6_858_000) or cy > int(0.18 * 6_858_000):
+                continue
+        elif ph is None:
+            continue
+
+        for canon in canonical_norms:
+            overlap = _text_overlap_score(norm_txt, canon)
+            contains = canon in norm_txt or norm_txt in canon
+            if norm_txt == canon or (contains and len(norm_txt) <= max(180, int(len(canon) * 1.25))) or (overlap >= 0.72 and len(norm_txt) <= max(180, int(len(canon) * 1.35))):
+                to_remove.append(sp)
+                break
+
     if is_token_only_layout:
         # On token-only layouts, once title/subtitle/date have been accepted we
         # should not leave old source text objects in the header band. Preserve
@@ -2849,8 +2883,9 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
                 to_remove.append(sp)
 
     for sp in to_remove:
-        if sp.getparent() is spTree:
-            spTree.remove(sp)
+        parent = sp.getparent()
+        if parent is not None:
+            parent.remove(sp)
 
     # -- Helper: build a minimal placeholder <p:sp> ----------------------------
     def _make_ph_sp(ph_type, ph_idx, text, sp_id, sp_name):
