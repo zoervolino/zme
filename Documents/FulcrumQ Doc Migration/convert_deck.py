@@ -5793,8 +5793,8 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
     count = 0
 
     for grpSp in slide_root.iter(f"{{{NS_P}}}grpSp"):
-        direct_sp = [c for c in grpSp if c.tag == f"{{{NS_P}}}sp"]
-        if not direct_sp:
+        group_sps = list(grpSp.iter(f"{{{NS_P}}}sp"))
+        if not group_sps:
             continue
 
         # Classify each direct child
@@ -5802,7 +5802,7 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
         label_shapes = []   # sp — has text, no (or transparent) fill
         card_shapes  = []   # (sp, fill_hex) — has both fill and text
 
-        for sp in direct_sp:
+        for sp in group_sps:
             fill = _shape_fill_hex(sp)   # handles solid + gradient
             text = _sp_text_content(sp)
             no_fill = (sp.find(f"{{{NS_P}}}spPr/{{{NS_A}}}noFill") is not None
@@ -5878,9 +5878,9 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
         # Final grouped sweep — for any text-bearing shape in the group, choose the
         # smallest overlapping filled shape within the same group (including itself)
         # and force readable neutral text against that immediate face/background.
-        all_text_shapes = [sp for sp in direct_sp if _sp_text_content(sp)]
+        all_text_shapes = [sp for sp in group_sps if _sp_text_content(sp)]
         fill_candidates = []
-        for sp in direct_sp:
+        for sp in group_sps:
             fill = _shape_fill_hex(sp)
             if not fill or fill in rag_preserve:
                 continue
