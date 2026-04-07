@@ -2074,6 +2074,12 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
             if cover in v7_name_map:
                 return v7_name_map[cover], f"agent({slide_type}) → {cover}"
 
+        # Never use cover layouts in the middle of a deck. If a non-opening
+        # slide looks cover-like, treat it as a divider instead.
+        if slide_idx > 1 and (slide_type == "cover" or (rec_layout and rec_layout.startswith("Cover"))):
+            if "Divider_Dark" in v7_name_map:
+                return v7_name_map["Divider_Dark"], "agent mid-deck cover → Divider_Dark"
+
         # Divider: trust semantic match if it resolved to a divider layout
         if matched_layout in ("Divider_Dark", "Divider_Light", "Divider_Crystal"):
             layout_path = v7_name_map.get(matched_layout)
@@ -2101,6 +2107,8 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
             cover = "Cover_Dark" if is_dark else "Cover_Light"
             if cover in v7_name_map:
                 name = cover
+        elif slide_idx > 1 and name.startswith("Cover"):
+            name = "Divider_Dark" if "Divider_Dark" in v7_name_map else name
         if name in v7_name_map:
             return v7_name_map[name], f"agent → {name}"
 
@@ -2973,6 +2981,16 @@ def inject_agent_title_subtitle(slide_root, layout_bytes, title_text, subtitle_t
         rPr      = etree.SubElement(r_el,    f"{{{NS_A}}}rPr")
         rPr.set("lang",  "en-US")
         rPr.set("dirty", "0")
+        # Minimal injected placeholders do not fully inherit layout typography
+        # on some PowerPoint builds. Match the dark token-only masters explicitly
+        # so divider/ending/cover-dark titles don't render as default black.
+        if ph_type in {"title", "ctrTitle", "subTitle"} and (
+            layout_name.startswith("Divider")
+            or layout_name.startswith("Ending")
+            or layout_name == "Cover_Dark"
+        ):
+            sf = etree.SubElement(rPr, f"{{{NS_A}}}solidFill")
+            etree.SubElement(sf, f"{{{NS_A}}}srgbClr").set("val", "FFFFFF")
         t_el     = etree.SubElement(r_el,    f"{{{NS_A}}}t")
         t_el.text = text
         return sp_el
@@ -3785,6 +3803,92 @@ def _image_has_face(image_bytes: bytes) -> bool:
         return False
 
 
+def _image_looks_like_photo_with_people(image_bytes: bytes) -> bool:
+    """Fallback headshot/photo heuristic when OpenCV is unavailable.
+
+    Intentionally conservative: only returns True for raster images that look
+    photographic and contain a non-trivial amount of skin-tone pixels.
+    """
+    try:
+        from PIL import Image
+        import io
+    except Exception:
+        return False
+
+    try:
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = im.size
+        if w < 80 or h < 80:
+            return False
+        # Downsample for cheap statistics.
+        im.thumbnail((160, 160))
+        px = list(im.getdata())
+        total = len(px)
+        if total == 0:
+            return False
+
+        # Photo-likeness: avoid flat icons/line art by requiring a broad color spread.
+        uniques = len(set(px))
+        if uniques < max(80, int(0.08 * total)):
+            return False
+
+        skin = 0
+        vivid = 0
+        for r, g, b in px:
+            mx = max(r, g, b); mn = min(r, g, b)
+            sat = (mx - mn) / max(mx, 1)
+            if sat > 0.22:
+                vivid += 1
+            # Broad skin-tone envelope in RGB/YCbCr-style terms.
+            if (
+                r > 95 and g > 40 and b > 20
+                and (max(r, g, b) - min(r, g, b)) > 15
+                and abs(r - g) > 15 and r > g and r > b
+            ):
+                skin += 1
+        skin_frac = skin / total
+        vivid_frac = vivid / total
+        return skin_frac >= 0.04 and vivid_frac >= 0.18
+    except Exception:
+        return False
+
+
+def _image_is_sparse_decorative_red(image_bytes: bytes) -> bool:
+    """Detect large mostly-white decorative graphics with sparse red accents.
+
+    Used to recolor large hero/curve graphics that would otherwise be skipped as
+    screenshots just because they cover a big area.
+    """
+    try:
+        from PIL import Image
+        import io
+    except Exception:
+        return False
+
+    try:
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        im.thumbnail((240, 240))
+        px = list(im.getdata())
+        total = len(px)
+        if total == 0:
+            return False
+
+        white = red = dark = 0
+        for r, g, b in px:
+            if r >= 235 and g >= 235 and b >= 235:
+                white += 1
+            if _is_red_hue(f"{r:02X}{g:02X}{b:02X}", min_sat=0.45, min_val=0.35):
+                red += 1
+            if max(r, g, b) <= 80:
+                dark += 1
+        white_frac = white / total
+        red_frac = red / total
+        dark_frac = dark / total
+        return white_frac >= 0.60 and red_frac >= 0.01 and dark_frac <= 0.18
+    except Exception:
+        return False
+
+
 def _pic_embed_rid(pic) -> str | None:
     blip = pic.find(f".//{{{NS_A}}}blip")
     if blip is None:
@@ -3904,19 +4008,29 @@ def _is_logo_swap_candidate(pic, file_map, slide_path: str, slide_w: int, slide_
     _, _, cx, cy = bbox
     aspect = cx / max(cy, 1)
 
-    if _is_corner_logo_candidate(pic, slide_w, slide_h):
-        return True
-
     img_bytes = _pic_image_bytes(pic, file_map, slide_path)
-    if img_bytes and _image_has_face(img_bytes):
+    if img_bytes and (_image_has_face(img_bytes) or _image_looks_like_photo_with_people(img_bytes)):
         return False
 
     slide_area = max(1, slide_w * slide_h)
     area_frac = (cx * cy) / slide_area
-    if area_frac > 0.18:
+    looks_like_ceoworks = _is_ceoworks_logo_image(img_bytes, aspect)
+
+    # Real detected logos may be a bit larger than our normal "small asset"
+    # threshold, but non-logo decorative graphics should never be swapped just
+    # because they sit in a corner.
+    if not looks_like_ceoworks and area_frac > 0.08:
         return False
 
-    return _is_ceoworks_logo_image(img_bytes, aspect)
+    # Corner position can still be a helpful supporting clue, but no longer
+    # forces a swap by itself.
+    if looks_like_ceoworks:
+        return True
+
+    if _is_corner_logo_candidate(pic, slide_w, slide_h) and area_frac <= 0.03:
+        return False
+
+    return False
 
 
 def _select_logo_asset_key(pic, slide_root) -> str:
@@ -4008,16 +4122,19 @@ def recolor_pics(slide_root, file_map=None, slide_path: str = "", slide_w=914400
         if blip is None:
             continue
 
-        # Classify by area: large = screenshot, small = logo/icon
+        img_bytes = _pic_image_bytes(pic, file_map, slide_path)
+
+        # Classify by area: large = screenshot, unless it looks like a sparse
+        # decorative red graphic that should still be brand-recolored.
         bbox = _pic_bbox(pic)
         if bbox is not None:
             pic_area = bbox[2] * bbox[3]
             if pic_area >= _SCREENSHOT_AREA_FRAC * slide_area:
-                pic.set(_FQ_SCREENSHOT_ATTR, "1")
-                continue   # preserve screenshot as-is
+                if not (img_bytes and _image_is_sparse_decorative_red(img_bytes)):
+                    pic.set(_FQ_SCREENSHOT_ATTR, "1")
+                    continue   # preserve screenshot as-is
 
-        img_bytes = _pic_image_bytes(pic, file_map, slide_path)
-        if img_bytes and _image_has_face(img_bytes):
+        if img_bytes and (_image_has_face(img_bytes) or _image_looks_like_photo_with_people(img_bytes)):
             pic.set(_FQ_FACEPHOTO_ATTR, "1")
             continue   # preserve human photos as-is
 
@@ -5084,6 +5201,84 @@ def _slide_preserves_client_logos(slide_root) -> bool:
         if text and _CLIENT_LOGO_TITLE_RE.fullmatch(text):
             return True
     return False
+
+
+def _image_looks_like_generic_logo(image_bytes: bytes, aspect: float) -> bool:
+    """Broad logo-mark detector for multi-logo/reference slides.
+
+    Less specific than `_is_ceoworks_logo_image()`: intended to recognize
+    third-party brand marks so we can preserve them instead of duotoning.
+    """
+    try:
+        from PIL import Image
+        import io
+    except Exception:
+        return False
+
+    try:
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+        im.thumbnail((200, 200))
+        w, h = im.size
+        px = list(im.getdata())
+        if not px:
+            return False
+        opaque = [p for p in px if p[3] > 24]
+        if not opaque:
+            return False
+
+        total = len(opaque)
+        whiteish = sum(1 for r, g, b, _ in opaque if r >= 235 and g >= 235 and b >= 235)
+        darkish = sum(1 for r, g, b, _ in opaque if max(r, g, b) <= 80)
+        saturated = 0
+        for r, g, b, _ in opaque:
+            mx = max(r, g, b); mn = min(r, g, b)
+            if (mx - mn) / max(mx, 1) >= 0.20:
+                saturated += 1
+
+        white_frac = whiteish / total
+        dark_frac = darkish / total
+        sat_frac = saturated / total
+        # Logos are usually sparse marks on white/transparent bg, not photos.
+        return (
+            (white_frac >= 0.35 or sat_frac <= 0.55)
+            and dark_frac <= 0.65
+            and 0.35 <= aspect <= 8.0
+            and not _image_looks_like_photo_with_people(image_bytes)
+        )
+    except Exception:
+        return False
+
+
+def _slide_preserves_reference_logos(slide_root, file_map, slide_path: str, slide_w: int, slide_h: int) -> bool:
+    """True when a slide looks like a peer-logo/reference-logo page.
+
+    Heuristic: several small pictures that look like logo marks, with no need
+    to remap them into FulcrumQ branding.
+    """
+    if not file_map or not slide_path:
+        return False
+
+    logo_like = 0
+    total_small = 0
+    slide_area = max(1, slide_w * slide_h)
+    for pic in slide_root.iter(f"{{{NS_P}}}pic"):
+        bbox = _pic_bbox(pic)
+        if bbox is None:
+            continue
+        _, _, cx, cy = bbox
+        area_frac = (cx * cy) / slide_area
+        if area_frac > 0.08:
+            continue
+        total_small += 1
+        img_bytes = _pic_image_bytes(pic, file_map, slide_path)
+        if not img_bytes:
+            continue
+        if _image_has_face(img_bytes) or _image_looks_like_photo_with_people(img_bytes):
+            continue
+        aspect = cx / max(cy, 1)
+        if _image_looks_like_generic_logo(img_bytes, aspect):
+            logo_like += 1
+    return total_small >= 4 and logo_like >= 4
 
 
 def normalize_alignment(slide_root):
@@ -6634,8 +6829,15 @@ def convert(source_path: Path, forced_layouts: dict = None):
         if n_names:
             print(f"         renamed  : {n_names} 'CEO Works' → 'FulcrumQ'")
         preserve_client_logos = _slide_preserves_client_logos(slide_root)
-        if preserve_client_logos:
-            print("         logos    : preserved (client-logo slide)")
+        preserve_reference_logos = _slide_preserves_reference_logos(
+            slide_root, file_map, spath, slide_w, slide_h
+        )
+        preserve_all_logos = preserve_client_logos or preserve_reference_logos
+        if preserve_all_logos:
+            if preserve_client_logos:
+                print("         logos    : preserved (client-logo slide)")
+            else:
+                print("         logos    : preserved (reference-logo slide)")
         else:
             n_logos = _swap_corner_logos(slide_root, file_map, spath, slide_w, slide_h)
             if n_logos:
@@ -6662,7 +6864,7 @@ def convert(source_path: Path, forced_layouts: dict = None):
         if n_bullets:
             print(f"         bullets  : {n_bullets} paragraph(s) normalised")
 
-        if preserve_client_logos:
+        if preserve_all_logos:
             n_pics = 0
         else:
             n_pics = recolor_pics(slide_root, file_map=file_map, slide_path=spath, slide_w=slide_w, slide_h=slide_h)
