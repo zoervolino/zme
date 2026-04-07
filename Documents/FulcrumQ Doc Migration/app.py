@@ -957,7 +957,14 @@ with tab_convert:
 
     # ── Convert mode ──────────────────────────────────────────────────────────
     if _cmode == "Convert":
-        master_exists = cd.MASTER_X.exists()
+        import importlib as _convert_il
+        _convert_cd = _convert_il.reload(cd)
+        master_exists = _convert_cd.MASTER_X.exists()
+
+        st.caption(
+            f"Using converter master/layout engine from `convert_deck.py` with master "
+            f"`{_convert_cd.MASTER_X.name}`."
+        )
 
         uploaded = st.file_uploader(
             "Upload source PPTX",
@@ -996,7 +1003,8 @@ with tab_convert:
                         with st.spinner(f"Converting {uf.name}…"):
                             with contextlib.redirect_stdout(log_buf):
                                 try:
-                                    out_path = cd.convert(src_path)
+                                    _convert_cd = _convert_il.reload(cd)
+                                    out_path = _convert_cd.convert(src_path)
                                 except Exception as exc:
                                     results.append((uf.name, None, str(exc), audit, [], None))
                                     continue
