@@ -662,6 +662,7 @@ def detect_semantic_rag_shape_ids(slide_root) -> set[str]:
             semantic_ids.add(sp_id)
 
     semantic_ids |= _small_status_shape_ids(slide_root)
+    semantic_ids |= _rag_progress_bar_shape_ids(slide_root)
 
     return semantic_ids
 
@@ -891,6 +892,41 @@ def _small_status_shape_ids(slide_root, slide_w: int = 12_192_000, slide_h: int 
         for c in bucketed:
             semantic_ids.add(c["id"])
     return semantic_ids
+
+
+def _rag_progress_bar_shape_ids(slide_root, slide_w: int = 12_192_000, slide_h: int = 6_858_000) -> set[str]:
+    """Detect repeated thin progress/status bars that encode RAG semantics."""
+    candidates = []
+    slide_area = max(1, slide_w * slide_h)
+    max_thickness = int(0.035 * min(slide_w, slide_h))
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        sp_id = _shape_id(sp)
+        if not sp_id:
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        _, _, cx, cy = bbox
+        if (cx * cy) > int(0.06 * slide_area):
+            continue
+        if min(cx, cy) > max_thickness:
+            continue
+        if max(cx, cy) / max(1, min(cx, cy)) < 3.0:
+            continue
+        fill = _shape_fill_hex(sp)
+        bucket = _semantic_rag_bucket(fill or "")
+        if bucket is None:
+            continue
+        txt = _shape_text(sp).strip()
+        if len(txt) > 12:
+            continue
+        candidates.append((sp_id, bucket))
+
+    if len(candidates) < 3:
+        return set()
+    if len({bucket for _, bucket in candidates}) < 2:
+        return set()
+    return {sp_id for sp_id, _ in candidates}
 
 
 def _semantic_rag_table_ids(slide_root) -> set[int]:
@@ -1482,7 +1518,7 @@ def remap_chart_colors(file_map):
         changed = False
         for srgb in root.iter(f"{{{NS_A}}}srgbClr"):
             v = srgb.get("val", "").upper()
-            new_v = _resolve_color(v, set())
+            new_v = _resolve_color(v, set(), semantic_rag=bool(_semantic_rag_bucket(v)))
             if new_v:
                 srgb.set("val", new_v)
                 changed = True
@@ -2158,8 +2194,12 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
 
     # ── Step 1: exact name match ───────────────────────────────────────────────
     normalized_old = _normalize_recommended_layout(old_name, v7_name_map, is_dark=is_dark)
+    if slide_idx > 1 and normalized_old == "Divider_Crystal" and "Divider_Dark" in v7_name_map:
+        normalized_old = "Divider_Dark"
     if normalized_old in v7_name_map and normalized_old != old_name:
         return v7_name_map[normalized_old], f"exact-normalized → {normalized_old}"
+    if slide_idx > 1 and old_name == "Divider_Crystal" and "Divider_Dark" in v7_name_map:
+        return v7_name_map["Divider_Dark"], "exact mid-deck crystal → Divider_Dark"
     if old_name in v7_name_map:
         return v7_name_map[old_name], "exact"
 
@@ -2217,6 +2257,8 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
 
         # Divider: trust semantic match if it resolved to a divider layout
         if matched_layout in ("Divider_Dark", "Divider_Light", "Divider_Crystal"):
+            if slide_idx > 1 and matched_layout == "Divider_Crystal" and "Divider_Dark" in v7_name_map:
+                return v7_name_map["Divider_Dark"], "agent divider crystal → Divider_Dark"
             layout_path = v7_name_map.get(matched_layout)
             if layout_path:
                 return layout_path, f"{matched_label} (layout name → divider, preserved)"
@@ -2250,7 +2292,9 @@ def resolve_layout(old_name, v7_name_map, slide_root=None,
     # ── Step 3: content-scan override ─────────────────────────────────────────
     # If the semantic match already resolved to a Divider, trust it — the source
     # layout name is explicit evidence. Don't let content-scan downgrade it.
-    if matched_layout in ("Divider_Dark", "Divider_Light"):
+    if matched_layout in ("Divider_Dark", "Divider_Light", "Divider_Crystal"):
+        if slide_idx > 1 and matched_layout == "Divider_Crystal" and "Divider_Dark" in v7_name_map:
+            return v7_name_map["Divider_Dark"], f"{matched_label} (mid-deck crystal → Divider_Dark)"
         layout_path = v7_name_map.get(matched_layout)
         if layout_path:
             return layout_path, f"{matched_label} (layout name → divider, preserved)"
@@ -4088,48 +4132,60 @@ def _is_ceoworks_logo_image(img_bytes: bytes, aspect: float) -> bool:
     def _is_orangeish(p):
         return p[0] >= 180 and 80 <= p[1] <= 220 and p[2] <= 140
 
+    def _is_purpleish(p):
+        r, g, b = p[0], p[1], p[2]
+        return r >= 90 and b >= 90 and b > g + 20 and (max(r, g, b) - min(r, g, b)) >= 35
+
+    def _is_accentish(p):
+        return _is_redish(p) or _is_orangeish(p) or _is_purpleish(p)
+
     def _is_grayish(p):
         mx = max(p[0], p[1], p[2]); mn = min(p[0], p[1], p[2])
         return mx - mn <= 28 and 70 <= mx <= 210
 
     red = sum(1 for p in opaque if _is_redish(p))
     orange = sum(1 for p in opaque if _is_orangeish(p))
+    accent = sum(1 for p in opaque if _is_accentish(p))
     gray = sum(1 for p in opaque if _is_grayish(p))
     white = sum(1 for p in opaque if _is_whiteish(p))
     total = len(opaque)
 
     red_frac = red / total
     orange_frac = orange / total
+    accent_frac = accent / total
     gray_frac = gray / total
     white_frac = white / total
 
-    # Spatial clue: full logo has red/orange concentrated on the left and gray on the right.
-    left_red = right_gray = 0
+    # Spatial clue: full logo has a colored accent concentrated on one side and
+    # grayscale wordmark/body content on the other.
+    left_accent = right_accent = right_gray = 0
     for yi in range(h):
         for xi in range(w):
             p = img.getpixel((xi, yi))
             if p[3] <= 32:
                 continue
-            if xi < int(0.42 * w) and (_is_redish(p) or _is_orangeish(p)):
-                left_red += 1
+            if xi < int(0.45 * w) and _is_accentish(p):
+                left_accent += 1
+            if xi > int(0.55 * w) and _is_accentish(p):
+                right_accent += 1
             if xi > int(0.38 * w) and _is_grayish(p):
                 right_gray += 1
 
     if aspect >= 2.0:
         return (
-            red_frac >= 0.03
+            accent_frac >= 0.03
             and gray_frac >= 0.08
             and white_frac >= 0.25
-            and left_red >= max(20, int(0.015 * w * h))
+            and (left_accent >= max(20, int(0.015 * w * h)) or right_accent >= max(20, int(0.015 * w * h)))
             and right_gray >= max(30, int(0.025 * w * h))
         )
 
     if 0.55 <= aspect <= 1.45:
         return (
-            (red_frac + orange_frac) >= 0.10
-            and white_frac >= 0.20
-            and gray_frac <= 0.20
-            and left_red >= max(20, int(0.02 * w * h))
+            accent_frac >= 0.07
+            and white_frac >= 0.15
+            and gray_frac <= 0.50
+            and (left_accent >= max(20, int(0.02 * w * h)) or right_accent >= max(20, int(0.02 * w * h)))
         )
 
     return False
@@ -5301,6 +5357,11 @@ _CLIENT_LOGO_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_TEAM_GRID_TITLE_RE = re.compile(
+    r"(practitioner|global team|leadership team|our team|team)$",
+    re.IGNORECASE,
+)
+
 
 def remap_brand_names(slide_root) -> int:
     """Replace all variants of 'CEO Works' with 'FulcrumQ' in slide text.
@@ -5363,6 +5424,24 @@ def _slide_preserves_client_logos(slide_root) -> bool:
         if text and _CLIENT_LOGO_TITLE_RE.fullmatch(text):
             return True
     return False
+
+
+def _slide_preserves_people_grid(slide_root) -> bool:
+    """True when a slide looks like a people/headshot mosaic or team grid."""
+    title_hits = False
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        ph = sp.find(f".//{{{NS_P}}}ph")
+        if ph is not None and ph.get("type", "") in {"title", "ctrTitle"}:
+            title = _shape_text(sp).strip().lower()
+            if title and (
+                "practitioner" in title
+                or "global team" in title
+                or title.endswith("team")
+            ):
+                title_hits = True
+                break
+    pic_count = sum(1 for _ in slide_root.iter(f"{{{NS_P}}}pic"))
+    return title_hits and pic_count >= 8
 
 
 def _image_looks_like_generic_logo(image_bytes: bytes, aspect: float) -> bool:
@@ -5781,43 +5860,8 @@ _BAND_COLORS = ("F2F2F2", "FFFFFF")   # even rows, odd rows
 
 
 def _style_table_body_bands(slide_root) -> int:
-    """Apply alternating F2F2F2 / white fills to body rows of data tables only.
-    Layout tables are skipped. Cells with an existing explicit solidFill
-    (RAG dots, accent rows) are left untouched.
-    Returns the number of cells banded."""
-    count = 0
-    for tbl in slide_root.iter(f"{{{NS_A}}}tbl"):
-        if _classify_table_role(tbl) != "data_table":
-            continue
-        rows = tbl.findall(f"{{{NS_A}}}tr")
-        if len(rows) < 2:
-            continue
-        for row_i, row in enumerate(rows[1:]):   # skip header
-            fill_val = _BAND_COLORS[row_i % 2]
-            for tc in row.findall(f"{{{NS_A}}}tc"):
-                tcPr = tc.find(f"{{{NS_A}}}tcPr")
-                # Skip if cell already has an explicit fill
-                if tcPr is not None and tcPr.find(f"{{{NS_A}}}solidFill") is not None:
-                    continue
-                if tcPr is None:
-                    txBody_idx = next(
-                        (j for j, ch in enumerate(tc)
-                         if ch.tag == f"{{{NS_A}}}txBody"),
-                        len(list(tc)),
-                    )
-                    tcPr = etree.Element(f"{{{NS_A}}}tcPr")
-                    tc.insert(txBody_idx, tcPr)
-                # Insert after any border elements (same ordering as header rows)
-                sf = etree.Element(f"{{{NS_A}}}solidFill")
-                srgb_el = etree.SubElement(sf, f"{{{NS_A}}}srgbClr")
-                srgb_el.set("val", fill_val)
-                insert_idx = 0
-                for ci, child in enumerate(tcPr):
-                    if child.tag in _TC_BORDER_TAGS:
-                        insert_idx = ci + 1
-                tcPr.insert(insert_idx, sf)
-                count += 1
-    return count
+    """Body row zebra striping is disabled; rely on row lines/borders instead."""
+    return 0
 
 
 # ── Kicker / label normalisation ─────────────────────────────────────────────
@@ -6991,6 +7035,7 @@ def convert(source_path: Path, forced_layouts: dict = None):
         if n_names:
             print(f"         renamed  : {n_names} 'CEO Works' → 'FulcrumQ'")
         preserve_client_logos = _slide_preserves_client_logos(slide_root)
+        preserve_people_grid = _slide_preserves_people_grid(slide_root)
         preserve_reference_logos = _slide_preserves_reference_logos(
             slide_root, file_map, spath, slide_w, slide_h
         )
@@ -7026,8 +7071,10 @@ def convert(source_path: Path, forced_layouts: dict = None):
         if n_bullets:
             print(f"         bullets  : {n_bullets} paragraph(s) normalised")
 
-        if preserve_all_logos:
+        if preserve_all_logos or preserve_people_grid:
             n_pics = 0
+            if preserve_people_grid and not preserve_all_logos:
+                print("         photos   : preserved (people-grid slide)")
         else:
             n_pics = recolor_pics(slide_root, file_map=file_map, slide_path=spath, slide_w=slide_w, slide_h=slide_h)
             if n_pics:
