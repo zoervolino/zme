@@ -5200,6 +5200,53 @@ def _style_table_header_rows(slide_root) -> int:
     return count
 
 
+def _normalize_dark_header_bars(slide_root, slide_w: int = 12_192_000, slide_h: int = 6_858_000) -> int:
+    """Normalize decorative dark header bars to FulcrumQ dark-purple + white text.
+
+    Targets non-placeholder text shapes that behave like section/header bars:
+    dark fill, compact bar height, reasonably wide, and positioned above body
+    content. This avoids preserving source teal/green decorative header text.
+    """
+    count = 0
+    for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+        if sp.find(f".//{{{NS_P}}}ph") is not None:
+            continue
+        text = _sp_text_content(sp)
+        if not text:
+            continue
+        fill = _shape_fill_hex(sp)
+        if not fill or not _bg_is_dark(fill):
+            continue
+        bbox = _shape_bbox(sp)
+        if bbox is None:
+            continue
+        x, y, cx, cy = bbox
+        if cy > int(0.10 * slide_h):
+            continue
+        if cx < int(0.16 * slide_w):
+            continue
+        if y > int(0.72 * slide_h):
+            continue
+
+        # Normalize bar fill to the standard dark header tone.
+        spPr = sp.find(f"{{{NS_P}}}spPr")
+        if spPr is not None:
+            sf = spPr.find(f"{{{NS_A}}}solidFill")
+            if sf is None:
+                sf = etree.SubElement(spPr, f"{{{NS_A}}}solidFill")
+            srgb = sf.find(f"{{{NS_A}}}srgbClr")
+            if srgb is None:
+                srgb = etree.SubElement(sf, f"{{{NS_A}}}srgbClr")
+            srgb.set("val", HEADER_DARK)
+
+        # Force decorative header text white; this is branding, not semantics.
+        for tag in (f"{{{NS_A}}}rPr", f"{{{NS_A}}}endParaRPr", f"{{{NS_A}}}defRPr"):
+            for rPr in sp.iter(tag):
+                _set_rpr_color(rPr, "FFFFFF")
+                count += 1
+    return count
+
+
 # ── Table body row banding ────────────────────────────────────────────────────
 
 _BAND_COLORS = ("F2F2F2", "FFFFFF")   # even rows, odd rows
@@ -6306,6 +6353,10 @@ def convert(source_path: Path, forced_layouts: dict = None):
         n_tbl_hdrs = _style_table_header_rows(slide_root)
         if n_tbl_hdrs:
             print(f"         tbl-hdr  : {n_tbl_hdrs} table header cell(s) styled")
+
+        n_dark_hdrs = _normalize_dark_header_bars(slide_root, slide_w, slide_h)
+        if n_dark_hdrs:
+            print(f"         hdr-bars : {n_dark_hdrs} dark header text run(s) normalized")
 
         n_tbl_bands = _style_table_body_bands(slide_root)
         if n_tbl_bands:
