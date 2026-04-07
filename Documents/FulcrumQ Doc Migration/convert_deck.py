@@ -5728,29 +5728,29 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
             tc = "FFFFFF" if _bg_is_dark(fill) else "1D1D1D"
             count += _set_text_color_preserving_emphasis(sp, tc, rag_preserve)
 
+        def _bbox(sp):
+            spPr = sp.find(f"{{{NS_P}}}spPr")
+            if spPr is None:
+                return None
+            xfrm = spPr.find(f"{{{NS_A}}}xfrm")
+            if xfrm is None:
+                return None
+            off = xfrm.find(f"{{{NS_A}}}off")
+            ext = xfrm.find(f"{{{NS_A}}}ext")
+            if off is None or ext is None:
+                return None
+            try:
+                return (
+                    int(off.get("x", 0)),
+                    int(off.get("y", 0)),
+                    int(ext.get("cx", 0)),
+                    int(ext.get("cy", 0)),
+                )
+            except ValueError:
+                return None
+
         # Pattern B — bg rect + label pair(s)
         if bg_shapes and label_shapes:
-            def _bbox(sp):
-                spPr = sp.find(f"{{{NS_P}}}spPr")
-                if spPr is None:
-                    return None
-                xfrm = spPr.find(f"{{{NS_A}}}xfrm")
-                if xfrm is None:
-                    return None
-                off = xfrm.find(f"{{{NS_A}}}off")
-                ext = xfrm.find(f"{{{NS_A}}}ext")
-                if off is None or ext is None:
-                    return None
-                try:
-                    return (
-                        int(off.get("x", 0)),
-                        int(off.get("y", 0)),
-                        int(ext.get("cx", 0)),
-                        int(ext.get("cy", 0)),
-                    )
-                except ValueError:
-                    return None
-
             for lsp in label_shapes:
                 lbb = _bbox(lsp)
                 if lbb is None:
@@ -5779,6 +5779,41 @@ def style_compound_groups(slide_root, rag_preserve: set) -> int:
                     continue
                 tc = "FFFFFF" if _bg_is_dark(chosen_fill) else "1D1D1D"
                 count += _set_text_color_preserving_emphasis(lsp, tc, rag_preserve)
+
+        # Final grouped sweep — for any text-bearing shape in the group, choose the
+        # smallest overlapping filled shape within the same group (including itself)
+        # and force readable neutral text against that immediate face/background.
+        all_text_shapes = [sp for sp in direct_sp if _sp_text_content(sp)]
+        fill_candidates = []
+        for sp in direct_sp:
+            fill = _shape_fill_hex(sp)
+            if not fill or fill in rag_preserve:
+                continue
+            bb = _bbox(sp)
+            if bb is None:
+                continue
+            fill_candidates.append((sp, fill, bb, bb[2] * bb[3]))
+
+        for tsp in all_text_shapes:
+            tbb = _bbox(tsp)
+            if tbb is None:
+                continue
+            tx, ty, tcx, tcy = tbb
+            chosen_fill = None
+            chosen_area = None
+            for fsp, fill, fbb, area in fill_candidates:
+                fx, fy, fcx, fcy = fbb
+                overlaps = tx < fx + fcx and tx + tcx > fx and ty < fy + fcy and ty + tcy > fy
+                contains = tx >= fx and ty >= fy and (tx + tcx) <= (fx + fcx) and (ty + tcy) <= (fy + fcy)
+                if not overlaps:
+                    continue
+                if chosen_fill is None or (contains and (chosen_area is None or area < chosen_area)) or (chosen_area is not None and area < chosen_area):
+                    chosen_fill = fill
+                    chosen_area = area
+            if chosen_fill is None:
+                continue
+            tc = "FFFFFF" if _bg_is_dark(chosen_fill) else "1D1D1D"
+            count += _set_text_color_preserving_emphasis(tsp, tc, rag_preserve)
 
     return count
 
