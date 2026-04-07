@@ -5279,9 +5279,16 @@ def _remove_duplicate_header_title_fragments(slide_root) -> int:
         if not norm_txt:
             continue
         candidate_font = _shape_font_size(sp)
+        candidate_words = len(txt.split())
 
         matched = False
         for item in canonical:
+            exact_norm_match = norm_txt == item["norm"]
+            if exact_norm_match:
+                if item["y"] is not None and y <= item["y"] + int(0.06 * 6_858_000):
+                    if candidate_words <= 5 and len(txt) <= max(48, len(item["text"]) + 12):
+                        matched = True
+                        break
             overlap = _text_overlap_score(norm_txt, item["norm"])
             contains = item["norm"] in norm_txt or norm_txt in item["norm"]
             if overlap < 0.72 and not contains:
