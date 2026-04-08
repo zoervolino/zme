@@ -6896,6 +6896,16 @@ def convert(source_path: Path, forced_layouts: dict = None):
 
         # ── Forced layout (user-designated from Guided Convert UI) ───────────────
         _forced_name = (forced_layouts or {}).get(i)
+        if _forced_name == "__GUIDED_CONTENT__":
+            _det = _agent_detect_title(_slide_pngs[i - 1]) if _slide_pngs and i <= len(_slide_pngs) else None
+            _det = _normalize_agent_top_region(_det, slide_root, slide_idx=i) if _det else None
+            _guided_sub = None
+            if _det and _det.get("subtitle_present") and _det.get("subtitle") is not None:
+                _guided_sub = _validate_subtitle(_det.get("subtitle", ""))
+                if _guided_sub and _subtitle_is_banner_like(slide_root, _guided_sub):
+                    _guided_sub = None
+            _forced_name = "Light_Sub" if _guided_sub and "Light_Sub" in x_name_map else "Title_Only_Light"
+
         if _forced_name and _forced_name in x_name_map:
             v7_layout      = x_name_map[_forced_name]
             v7_layout_name = _forced_name

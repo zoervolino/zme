@@ -1030,6 +1030,7 @@ def _render_guided_convert():
                     "cover": "Cover_Light",
                     "divider": "Divider_Dark",
                     "ending": "Ending_PivotPurple",
+                    "content": "__GUIDED_CONTENT__",
                 }
                 _gc_forced = {
                     idx: _gc_layout_map[des]
@@ -3174,4 +3175,3 @@ with tab_rag:
             f"</tr>"
         )
     st.markdown(header + rows_html + "</tbody></table>", unsafe_allow_html=True)
-
