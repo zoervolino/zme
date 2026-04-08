@@ -6883,6 +6883,55 @@ def convert(source_path: Path, forced_layouts: dict = None):
     total_fonts    = 0
     total_colors   = 0
 
+    def _guided_extract_title_subtitle(slide_root):
+        """Best-effort extraction for Guided content slides when agent title is absent.
+
+        Prefer existing title/subtitle placeholders if present; otherwise fall back
+        to the strongest free top-band text shape and an optional second line/shape.
+        """
+        title_text = None
+        subtitle_text = None
+
+        title_shapes = []
+        subtitle_shapes = []
+        top_free = []
+        for sp in slide_root.iter(f"{{{NS_P}}}sp"):
+            txt = "".join(t.text or "" for t in sp.iter(f"{{{NS_A}}}t")).strip()
+            if not txt:
+                continue
+            ph = sp.find(f".//{{{NS_P}}}ph")
+            if ph is not None:
+                pht = ph.get("type", "body")
+                idx = ph.get("idx", "")
+                if pht in {"title", "ctrTitle"}:
+                    title_shapes.append(txt)
+                    continue
+                if pht == "subTitle" or (pht == "body" and idx in {"1", "12"}):
+                    subtitle_shapes.append(txt)
+                    continue
+            bbox = _shape_bbox(sp)
+            if bbox is None:
+                continue
+            x, y, cx, cy = bbox
+            if y > int(0.24 * 6_858_000):
+                continue
+            top_free.append((_shape_font_size(sp), -cy, y, x, txt))
+
+        if title_shapes:
+            title_text = max(title_shapes, key=len)
+        if subtitle_shapes:
+            subtitle_text = max(subtitle_shapes, key=len)
+
+        if not title_text and top_free:
+            top_free.sort(reverse=True)
+            title_text = top_free[0][4]
+            if len(top_free) > 1:
+                subtitle_text = top_free[1][4]
+
+        title_text = title_text.strip() if title_text else None
+        subtitle_text = _validate_subtitle(subtitle_text) if subtitle_text else None
+        return title_text, subtitle_text
+
     for i, spath in enumerate(slides, 1):
         # Identify old layout name
         old_lpath = get_slide_layout(file_map, spath)
@@ -7030,6 +7079,21 @@ def convert(source_path: Path, forced_layouts: dict = None):
             n_snapped = snap_subtitle_to_layout(slide_root, file_map[v7_layout])
             if n_snapped:
                 print(f"         snapped : {n_snapped} subtitle-vibe ph(s) → layout position")
+
+            if _guided_content_mode:
+                _guided_title, _guided_subtitle = _guided_extract_title_subtitle(slide_root)
+                if _guided_title:
+                    inj_t, inj_s, _ = inject_agent_title_subtitle(
+                        slide_root,
+                        file_map[v7_layout],
+                        _guided_title,
+                        _guided_subtitle if v7_layout_name == "Light_Sub" else None,
+                        layout_name=v7_layout_name,
+                    )
+                    if inj_t:
+                        print(f"         guided   : injected fallback title='{_guided_title[:55]}'")
+                    if inj_s and _guided_subtitle:
+                        print(f"                    subtitle='{_guided_subtitle[:50]}'")
 
         bullet_promoted = promote_bullet_txbox(slide_root, file_map, spath)
         if bullet_promoted and not _forced_name:
