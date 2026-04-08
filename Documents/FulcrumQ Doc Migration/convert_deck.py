@@ -1094,7 +1094,6 @@ LAYOUT_SEMANTIC = [
     ("chapter",      "Divider_Dark"),
     ("thank",    "Ending_PivotPurple"),
     ("ending",   "Ending_PivotPurple"),
-    ("blank",    "Blank_Light"),
     ("subtitle", "Light_Sub"),
     ("two col",  "Title_Only_Light"),
     ("dark",     "Title_Only_Dark"),
