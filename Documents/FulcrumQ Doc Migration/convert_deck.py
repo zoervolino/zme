@@ -6896,6 +6896,7 @@ def convert(source_path: Path, forced_layouts: dict = None):
 
         # ── Forced layout (user-designated from Guided Convert UI) ───────────────
         _forced_name = (forced_layouts or {}).get(i)
+        _guided_content_mode = (_forced_name == "__GUIDED_CONTENT__")
         if _forced_name == "__GUIDED_CONTENT__":
             _det = _agent_detect_title(_slide_pngs[i - 1]) if _slide_pngs and i <= len(_slide_pngs) else None
             _det = _normalize_agent_top_region(_det, slide_root, slide_idx=i) if _det else None
@@ -6912,8 +6913,11 @@ def convert(source_path: Path, forced_layouts: dict = None):
             v7_num         = re.search(r"slideLayout(\d+)\.xml$", v7_layout).group(1)
             remap_slide_layout(file_map, spath, v7_layout)
             print(f"  slide{i:2d}: '{old_name}' [forced → {_forced_name}] → layout{v7_num} [{_forced_name}]")
-            _det        = None
-            _agent_hint = None
+            if not _guided_content_mode:
+                _det = None
+                _agent_hint = None
+            else:
+                _agent_hint = _det.get("title") if _det else None
         else:
             # Agent title/subtitle detection — runs before resolve_layout so subtitle
             # info can inform layout choice.
