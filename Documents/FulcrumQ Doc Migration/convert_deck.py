@@ -2161,6 +2161,8 @@ def _normalize_recommended_layout(layout_name: str, v7_name_map: dict, is_dark: 
         "title_only_light": "Title_Only_Light",
         "content_dark": "Title_Only_Dark",
         "title_only_dark": "Title_Only_Dark",
+        "blank_light": "Title_Only_Light",
+        "blank_dark": "Title_Only_Dark",
         "cover_light": "Cover_Light",
         "cover_dark": "Cover_Dark",
         "divider_dark": "Divider_Dark",
